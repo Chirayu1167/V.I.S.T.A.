@@ -23,6 +23,11 @@ Fine-grained PAT (starts with `github_pat_...`). Must have repo access configure
 5. `git commit -m "message"`
 6. `git push origin main`
 
+## Git Config (fixed for contribution tracking)
+- `user.name = FarhanFarooqui122`
+- `user.email = farhanfarooqui312@gmail.com` (must match GitHub primary email, NOT the noreply address)
+- Commits show on profile only when email matches GitHub account. Previous commits were amended with `--amend --reset-author` and force-pushed to fix this.
+
 ## Tech Stack
 - **OS**: Windows, NVIDIA GPU
 - **Vehicle/pedestrian detection**: YOLOv8n (COCO pretrained) — `pip install ultralytics`, model `yolov8n.pt`
