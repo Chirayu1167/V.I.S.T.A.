@@ -47,7 +47,7 @@ Police       EMS
 ## Features
 
 1. **Multi-camera RTSP ingestion** — pull live frames from CCTV feeds
-2. **Motion prefilter** — skip static/unchanging frames before running heavy models, to save compute and reduce average latency
+2. **Motion prefilter (violence branch only)** — skip static/unchanging frames before running the violence model to save compute; accident branch processes every frame since the moment of impact cannot be skipped
 3. **Two independent, concurrently-running detection pipelines** (accident + violence), using true concurrency (threads/async/CUDA streams) — not sequential calls — so GPU inference genuinely overlaps
 4. **Per-branch verification** — each pipeline confirms an event persists across a short window of consecutive frames before triggering an alert, to cut false positives without slowing the other branch
 5. **Severity scoring on the accident branch** — distinguishes no-injury accidents (→ traffic police) from injury-flagged accidents (→ hospital/EMS); both can fire together for severe cases
@@ -58,31 +58,134 @@ Police       EMS
 
 ---
 
-## Models to Use (accuracy + latency optimized)
+## Accident Detection Pipeline (Tracking + Heuristics + ML Confirmation)
 
-You have a dedicated NVIDIA GPU, so prioritize models benchmarked for real-time GPU inference over ones optimized purely for edge/CPU deployment.
+A single-frame object detection model (like YOLO11x) cannot reliably detect the *moment* of an accident — it only sees aftermath (crashed cars, debris) and fails on unseen camera angles. Instead, we detect accidents by analyzing **vehicle dynamics across time**.
 
-### Accident Detection
+### Why this approach
+
+| Approach | Detects moment of impact? | Works on any camera? | Latency |
+|---|---|---|---|
+| Single-frame accident classifier | No (aftermath only) | No (angle-dependent) | Low |
+| 3D CNN video model | Yes | Needs fine-tuning | High (frame buffer) |
+| **Tracking + heuristics (this project)** | **Yes** | **Yes** | **~0.5-1s** |
+
+### Pipeline (frame-by-frame)
+
+```
+CCTV frame
+    │
+    ▼
+┌──────────────────────────────┐
+│ YOLOv8n (COCO pretrained)    │ ← detects vehicles + persons/cyclists
+│ Per-frame, ~1-2ms on GPU     │   (car, truck, bus, person, bicycle, etc.)
+└──────────────┬───────────────┘
+               │ bounding boxes
+               ▼
+┌──────────────────────────────┐
+│ ByteTrack                    │ ← assigns/updates track IDs; matches same
+│ <1ms, no neural net          │   vehicle across consecutive frames
+│ (IoU matching + Kalman filter)│
+└──────────────┬───────────────┘
+               │ track history: {track_id: [(x,y,t), ...]}
+               ▼
+┌──────────────────────────────┐
+│ Heuristic checks (per frame) │ ← three independent signals
+└──────────────┬───────────────┘
+               │
+     ┌─────────┼─────────┐
+     ▼         ▼         ▼
+┌────────┐ ┌────────┐ ┌──────────┐
+│ Speed  │ │ Colli- │ │ Anomaly  │
+│ drop   │ │ sion   │ │ stop     │
+│ >80%   │ │ detect │ │ (middle  │
+│ in <   │ │ (two   │ │ of road  │
+│ 0.5s   │ │ tracks │ │ > 2s)    │
+│        │ │ overlap│ │          │
+└───┬────┘ └───┬────┘ └────┬─────┘
+    │         │         │
+    └────┬────┴────┬────┘
+         │         │
+         ▼         ▼
+   ┌──────────────┐
+   │ Hit-and-run  │
+   │ (vehicle +   │
+   │ pedestrian   │
+   │ intersection │
+   │ + ped stops) │
+   └──────┬───────┘
+                 │ any trigger?
+                    ▼
+┌──────────────────────────────┐
+│ Verification (5-frame window)│ ← confirm accident persists across frames
+│                              │   to reject false positives
+└──────────────┬───────────────┘
+               │ confirmed
+               ▼
+┌──────────────────────────────┐
+│ YOLO11x accident detector    │ ← secondary ML confirmation on the
+│ (HF: Enos-123)               │   flagged frame (optional confidence boost)
+│ mAP@0.5: 0.826               │
+│ F1 (accident): 0.833         │
+└──────────────┬───────────────┘
+               │ confirmed
+               ▼
+    ┌──── Alert Dispatch ────┐
+    ▼                         ▼
+Traffic Police / EMS    Police Control Room
+```
+
+### Heuristic Signals Explained
+
+**1. Speed drop** — For each tracked vehicle, compute velocity = `displacement / Δt` (pixels/second). If velocity drops >80% within 0.5 seconds, a collision likely occurred. Catches rear-ends, T-bones, head-ons.
+
+**2. Collision detection** — For every pair of tracked vehicles, if both stop at the same location (bounding boxes overlap with IoU > 0.3 and both have near-zero velocity), a collision between them likely occurred.
+
+**3. Anomaly stop** — If a vehicle stops in the middle of the road (not at an intersection or roadside) for >2 seconds, it may have hit something or someone.
+
+**4. Hit-and-run / pedestrian strike** — When a vehicle track intersects with a pedestrian/cyclist track at the same location+time, and the pedestrian/cyclist track then shows sudden velocity drop >90% (fell/stopped) while the vehicle track continues moving — a hit-and-run occurred. This catches the most dangerous scenarios that the other three signals miss.
+
+### Models & Libraries Used
+
+| Component | What | Source | Why |
+|---|---|---|---|
+| Vehicle & pedestrian detector | **YOLOv8n** (COCO pretrained) | [Ultralytics YOLOv8](https://huggingface.co/Ultralytics/YOLOv8) — `pip install ultralytics`, model: `yolov8n.pt` | 3.2M params, ~1-2ms per frame on GPU, detects cars/trucks/buses + persons/cyclists (80 COCO classes) |
+| Tracker | **ByteTrack** | [github.com/ifzhang/ByteTrack](https://github.com/ifzhang/ByteTrack) — `pip install bytetrack` | State-of-the-art tracker, <1ms per frame, no GPU needed for tracking |
+| Secondary confirmation | **YOLO11x accident detector** | [HF: Enos-123/traffic-accident-detection-yolo11x](https://huggingface.co/Enos-123/traffic-accident-detection-yolo11x) | Fine-tuned on surveillance accident data; mAP@0.5: 0.826, recall: 0.855 |
+
+### How to Use
+
+```python
+# 1. Vehicle detection
+from ultralytics import YOLO
+detector = YOLO("yolov8n.pt")  # COCO pretrained
+results = detector(frame)       # returns boxes for cars, trucks, buses
+
+# 2. Tracking
+from bytetrack import ByteTrack
+tracker = ByteTrack()
+tracks = tracker.update(detections)  # each track has a unique ID + history
+
+# 3. Heuristic checks (custom logic, ~50 lines)
+for track in tracks:
+    if track.velocity_drop() > 0.8:  # sudden stop
+        trigger_accident_alert()
+
+# 4. Optional confirmation
+if heuristic_triggered:
+    accident_model = YOLO("yolo11x-accident.pt")  # from HuggingFace
+    result = accident_model(flagged_frame)
+    if result[0].boxes.conf.max() > 0.5:
+        dispatch_alert()
+```
+
+### Violence Detection (unchanged)
 
 | Priority | Model | Source | Why |
 |---|---|---|---|
-| **Primary** | CSP-YOLOv9 | [github.com/sajid6230/csp-yolov9-traffic-accident-detection](https://github.com/sajid6230/csp-yolov9-traffic-accident-detection) | Newer YOLO architecture, better parameter efficiency than YOLOv8x at comparable accuracy |
-| **Alternative (newer arch, HF-hosted)** | YOLO11x accident detector | [huggingface.co/Enos-123/traffic-accident-detection-yolo11x](https://huggingface.co/Enos-123/traffic-accident-detection-yolo11x) | YOLO11 generally improves accuracy/speed trade-off over v8/v9; worth benchmarking against CSP-YOLOv9 on your own footage |
-| **Speed-priority fallback** | YOLOv8s (not YOLOv8x) | [huggingface.co/Enos-123/accident-evaluator-yolov8x](https://huggingface.co/Enos-123/accident-evaluator-yolov8x) (swap to the `s` variant) | YOLOv8x is the largest variant — trades speed for accuracy you likely don't need; `s` or `m` is faster per frame |
-| **Zero-shot verification signal** | ACCIDENT (CLIP + optical flow) | [github.com/sarveshtalele/ACCIDENT-CVPR_2026](https://github.com/sarveshtalele/ACCIDENT-CVPR_2026) | No training required, works on a different signal (motion + CLIP) than YOLO — good secondary check to cross-verify and further reduce false positives if latency budget allows |
-
-### Violence / Road-Rage Detection
-
-| Priority | Model | Source | Why |
-|---|---|---|---|
-| **Primary (lowest latency)** | YOLOv8-nano or YOLOv8-small fight detector | [huggingface.co/Musawer14/fight_detection_yolov8](https://huggingface.co/Musawer14/fight_detection_yolov8) | Nano/small variants are purpose-built for real-time, resource-constrained detection — very low per-frame latency on GPU |
-| **Alternative (higher accuracy, still real-time)** | DenseNet121 real-time violence model | [github.com/vavi39/Real-Time-Violence-Detection-in-Surveillance-Streams](https://github.com/vavi39/Real-Time-Violence-Detection-in-Surveillance-Streams) | Benchmarked at ~30 FPS with native RTSP multi-camera support — good if nano/small accuracy isn't sufficient |
-| **Road-rage specific** | 3D CNN road rage detector | [github.com/tanveer744/road-rage-detection](https://github.com/tanveer744/road-rage-detection) | Trained specifically for road rage rather than general violence — closer to your actual use case if you want to distinguish "fight" from "road rage" as separate alert types |
-| **Weapon detection add-on (optional)** | VIGIL.AI | [github.com/ash-iiiiish/VIGIl.AI-Violence-WeaponDetectionTool](https://github.com/ash-iiiiish/VIGIl.AI-Violence-WeaponDetectionTool) | Adds weapon detection (R3D-18 + YOLOv8) on top of violence — could feed into severity scoring for the police-control branch |
-
-### Recommendation for best accuracy/latency trade-off
-
-Start with **YOLOv8-nano/small (Musawer14)** for violence and **CSP-YOLOv9 or YOLO11x** for accidents — benchmark both against a short clip set from your target camera angle before committing, since real-world accuracy on your specific footage (angle, lighting, resolution) matters more than published benchmarks. If accuracy is too low on your test clips, step up to the DenseNet121 model for violence, since it's the only one with a stated real-time throughput number you can verify.
+| **Primary** | YOLOv8-nano fight detector | [HF: Musawer14/fight_detection_yolov8](https://huggingface.co/Musawer14/fight_detection_yolov8) | Lowest latency, ~1-2ms per frame, purpose-built for real-time |
+| **Alternative** | DenseNet121 real-time violence | [github.com/vavi39/Real-Time-Violence-Detection-in-Surveillance-Streams](https://github.com/vavi39/Real-Time-Violence-Detection-in-Surveillance-Streams) | ~30 FPS with native RTSP multi-camera support |
+| **Add-on** | VIGIL.AI weapon detection | [github.com/ash-iiiiish/VIGIl.AI-Violence-WeaponDetectionTool](https://github.com/ash-iiiiish/VIGIl.AI-Violence-WeaponDetectionTool) | R3D-18 + YOLOv8, optional severity input for police branch |
 
 ---
 
@@ -98,3 +201,11 @@ Start with **YOLOv8-nano/small (Musawer14)** for violence and **CSP-YOLOv9 or YO
 - **"Reports to authorities" will be mocked** in the demo (no real government API access) — be upfront about this; route to a mock webhook (Telegram bot / Slack / logged REST endpoint) rather than overselling it as live integration.
 - **False positive rate is the first thing technical judges will probe.** The per-branch verification layer (confirming across multiple frames before alerting) is your answer — have a concrete number ready (e.g., "X% reduction in false positives after verification, tested on Y clips").
 - **True concurrency matters for the latency claim.** Running both models sequentially in one thread doesn't give real parallelism — make sure the actual implementation uses threading, multiprocessing, or async/CUDA streams so both branches genuinely overlap on the GPU.
+
+---
+
+## Update Log
+
+| Date | Changes |
+|---|---|
+| 2026-07-26 | Replaced static accident model list with tracking + heuristics pipeline (YOLOv8n + ByteTrack + 4 heuristic signals + YOLO11x secondary confirmation). Added hit-and-run detection. Moved motion prefilter to violence branch only. |
