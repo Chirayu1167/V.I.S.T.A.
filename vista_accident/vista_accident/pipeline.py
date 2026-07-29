@@ -19,6 +19,7 @@ from .config import CameraConfig, DispatchConfig, HeuristicConfig
 from .confirmation import SecondaryConfirmation
 from .detector import Detector
 from .heuristics import run_all_heuristics
+from .severity import SeverityAssessor, SeverityConfig
 from .track_history import TrackHistory
 from .tracker import Tracker
 from .verification import Verifier
@@ -32,6 +33,7 @@ class AccidentPipeline:
                  camera_cfg: Optional[CameraConfig] = None,
                  dispatch_cfg: Optional[DispatchConfig] = None,
                  secondary: Optional[SecondaryConfirmation] = None,
+                 severity_cfg: Optional[SeverityConfig] = None,
                  clip_buffer_seconds: float = 4.0,
                  fps_hint: float = 25.0):
         self.cfg = heuristic_cfg or HeuristicConfig()
@@ -42,6 +44,7 @@ class AccidentPipeline:
         self.tracker = tracker or Tracker(frame_rate=int(fps_hint))
         self.history = TrackHistory(history_seconds=self.cfg.history_seconds, assumed_fps=fps_hint)
         self.verifier = Verifier(self.cfg)
+        self.severity = SeverityAssessor(severity_cfg)
         self.secondary = secondary or SecondaryConfirmation(weights_path=None)
         self.dispatcher = AlertDispatcher(self.camera_cfg, self.dispatch_cfg)
 
@@ -76,8 +79,9 @@ class AccidentPipeline:
                 self.confirmed_log.append((event, secondary_result, "rejected_by_secondary"))
                 continue
 
+            severity = self.severity.assess(event, self.history)
             clip_path = None  # wire up e.g. self._save_clip(event) for real clip export
-            payload = self.dispatcher.build_and_dispatch(event, secondary_result, clip_path)
+            payload = self.dispatcher.build_and_dispatch(event, secondary_result, clip_path, severity=severity)
             alerts.append(payload)
             self.confirmed_log.append((event, secondary_result, "dispatched"))
 

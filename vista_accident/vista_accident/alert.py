@@ -1,8 +1,8 @@
 """
 Alert packaging + multi-channel dispatch.
 
-- Severity scoring decides whether an event is no-injury (-> traffic police)
-  or injury-flagged (-> traffic police AND hospital/EMS, fired together).
+- Severity scoring uses the dynamic SeverityAssessor by default (imported from
+  .severity). Falls back to a static kind->severity map if no override given.
 - Dispatch to traffic police / hospital-EMS / police control room is MOCKED
   for the hackathon demo (see config.DispatchConfig) — swap `_send_mock` for
   a real webhook/SMS/API call when government API access exists.
@@ -18,23 +18,16 @@ from dataclasses import asdict, dataclass, field
 from typing import List, Optional
 
 from .config import CameraConfig, DispatchConfig
+from .severity import CHANNELS_BY_SEVERITY
 from .verification import ConfirmedEvent
 
 
-# Severity routing table. "high" -> traffic police + EMS (+ control room for
-# violence-adjacent cases like hit-and-run). "medium"/"low" -> traffic police
-# only. Tune against real incident data before deployment.
+# Fallback static routing when no dynamic severity override is provided.
 SEVERITY_BY_KIND = {
-    "hit_and_run": "high",     # pedestrian/cyclist struck — always injury-flagged
-    "collision": "high",       # vehicle-vehicle collision — assume injury possible
-    "speed_drop": "medium",    # hard braking/impact, no confirmed collision partner
-    "anomaly_stop": "low",     # stopped mid-road — could be breakdown, needs triage only
-}
-
-CHANNELS_BY_SEVERITY = {
-    "high": ("traffic_police", "hospital_ems", "police_control_room"),
-    "medium": ("traffic_police",),
-    "low": ("traffic_police",),
+    "hit_and_run": "high",
+    "collision": "high",
+    "speed_drop": "medium",
+    "anomaly_stop": "low",
 }
 
 
@@ -69,10 +62,12 @@ class AlertDispatcher:
         self._log_thread.start()
 
     def build_and_dispatch(self, event: ConfirmedEvent, secondary_result: dict,
-                            clip_path: Optional[str] = None) -> AlertPayload:
+                            clip_path: Optional[str] = None,
+                            severity: Optional[str] = None) -> AlertPayload:
         self._counter += 1
-        severity = SEVERITY_BY_KIND.get(event.kind, "medium")
-        channels = CHANNELS_BY_SEVERITY[severity]
+        if severity is None:
+            severity = SEVERITY_BY_KIND.get(event.kind, "medium")
+        channels = CHANNELS_BY_SEVERITY.get(severity, ("traffic_police",))
 
         payload = AlertPayload(
             alert_id=f"{self.camera_cfg.camera_id}-{int(event.t)}-{self._counter}",
