@@ -21,13 +21,13 @@ class Detector:
         self.conf_threshold = conf_threshold
         self.classes = list(classes) if classes is not None else list(ALL_TRACKED_CLASSES)
 
-        # Fall back gracefully if no GPU is available (e.g. dev laptop / hackathon demo box).
-        try:
-            import torch
-            if device == "cuda" and not torch.cuda.is_available():
-                self.device = "cpu"
-        except ImportError:
-            self.device = "cpu"
+        if device == "cuda":
+            try:
+                import torch
+                if not torch.cuda.is_available():
+                    raise RuntimeError("CUDA requested but no GPU detected. VISTA requires a CUDA-capable GPU.")
+            except ImportError:
+                raise RuntimeError("CUDA requested but torch not available. Install torch with CUDA support.")
 
         # FP16 half-precision only makes sense (and is only supported) on CUDA.
         if self.device != "cuda":
