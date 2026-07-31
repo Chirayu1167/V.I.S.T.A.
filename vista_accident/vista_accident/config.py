@@ -9,6 +9,7 @@ CCTV-style overhead/angled feed.
 """
 
 from dataclasses import dataclass, field
+from typing import Dict, List
 
 
 # ---------------------------------------------------------------------------
@@ -57,8 +58,14 @@ class HeuristicConfig:
     hitrun_vehicle_continues_min_speed: float = 20.0  # px/s, vehicle keeps moving after
 
     # --- Verification (per-branch, across consecutive frames) ---
-    verify_window_frames: int = 5           # must trigger in this many consecutive checks
+    verify_window_frames: int = 5           # default: must trigger in this many consecutive checks
+    verify_window_frames_by_kind: Dict[str, int] = field(default_factory=lambda: {
+        # Fast impacts only overlap for a few frames — confirm quicker.
+        "collision": 3,
+    })
     verify_cooldown_s: float = 15.0         # suppress repeat alerts for same track/pair
+    verify_dedup_radius_px: float = 90.0    # suppress re-confirmations of the same physical
+                                            # incident even if tracker re-assigned track IDs
 
 
 @dataclass

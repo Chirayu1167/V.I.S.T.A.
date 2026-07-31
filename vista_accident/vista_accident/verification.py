@@ -41,6 +41,11 @@ class Verifier:
     def __init__(self, cfg: HeuristicConfig):
         self.cfg = cfg
         self._state: Dict[str, _EventState] = {}
+        # Recently confirmed alerts (t, kind, cx, cy, track_ids) used for
+        # spatial dedup: tracker ID swaps at impact re-key the same physical
+        # incident, so a same-kind re-confirmation near the same spot is
+        # treated as a repeat rather than a brand-new accident.
+        self._recent_confirmed = []
 
     def process(self, t: float, raw_triggers: List[RawTrigger]) -> List[ConfirmedEvent]:
         confirmed = []
@@ -57,14 +62,24 @@ class Verifier:
             st.streak += 1
             st.last_t = t
 
-            if st.streak >= self.cfg.verify_window_frames:
-                confirmed.append(ConfirmedEvent(
-                    kind=trig.kind, track_ids=trig.track_ids, t=t,
-                    consecutive_frames=st.streak, meta=trig.meta,
-                ))
-                st.confirmed_at = t
-                st.cooldown_until = t + self.cfg.verify_cooldown_s
-                st.streak = 0  # reset so it must re-persist for a fresh alert later
+            window = self.cfg.verify_window_frames_by_kind.get(trig.kind,
+                                                               self.cfg.verify_window_frames)
+            if st.streak < window:
+                continue
+
+            if self._recently_confirmed(trig, t):
+                st.streak = 0  # same physical incident re-keyed by tracker — suppress
+                continue
+
+            confirmed.append(ConfirmedEvent(
+                kind=trig.kind, track_ids=trig.track_ids, t=t,
+                consecutive_frames=st.streak, meta=trig.meta,
+            ))
+            st.confirmed_at = t
+            st.cooldown_until = t + self.cfg.verify_cooldown_s
+            st.streak = 0  # reset so it must re-persist for a fresh alert later
+            self._recent_confirmed.append(
+                (t, trig.kind, trig.meta.get("cx"), trig.meta.get("cy"), trig.track_ids))
 
         # Any event key that didn't fire this frame resets its streak — the
         # signal must persist on *consecutive* checks, not just cumulatively.
@@ -72,4 +87,23 @@ class Verifier:
             if key not in fired_keys:
                 st.streak = 0
 
+        # Forget old confirmations once their cooldown has lapsed.
+        cutoff = t - self.cfg.verify_cooldown_s
+        self._recent_confirmed = [r for r in self._recent_confirmed if r[0] > cutoff]
+
         return confirmed
+
+    def _recently_confirmed(self, trig: RawTrigger, t: float) -> bool:
+        for r_t, r_kind, r_cx, r_cy, r_ids in self._recent_confirmed:
+            if r_kind != trig.kind:
+                continue
+            if t - r_t > self.cfg.verify_cooldown_s:
+                continue
+            if set(r_ids) & set(trig.track_ids):
+                return True  # same tracker IDs — direct repeat
+            cx, cy = trig.meta.get("cx"), trig.meta.get("cy")
+            if r_cx is not None and cx is not None:
+                dist = ((r_cx - cx) ** 2 + (r_cy - cy) ** 2) ** 0.5
+                if dist <= self.cfg.verify_dedup_radius_px:
+                    return True  # same spot, new IDs (tracker ID churn at impact)
+        return False
