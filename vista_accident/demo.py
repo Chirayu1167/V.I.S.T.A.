@@ -30,7 +30,7 @@ from collections import deque
 import cv2
 
 from vista_accident import AccidentPipeline, CameraConfig, DispatchConfig, HeuristicConfig
-from vista_accident.render import ALERT_DISPLAY_SECONDS, draw_overlay
+from vista_accident.render import ALERT_DISPLAY_SECONDS, SpeedEstimator, draw_overlay
 
 
 def main():
@@ -44,8 +44,10 @@ def main():
     ap.add_argument("--secondary-weights", default=None,
                      help="Optional path to YOLO11x accident-confirmation weights")
     ap.add_argument("--px-per-meter", type=float, default=None,
-                     help="Optional calibration factor (pixels per real-world meter) to "
-                          "display speed in km/h instead of raw px/s.")
+                     help="Optional manual camera calibration (pixels per real-world meter). "
+                          "If omitted, speed is auto-estimated per object from its own "
+                          "bounding-box width vs. its class's typical real-world size — "
+                          "less precise than a real calibration, but always shown in km/h.")
     ap.add_argument("--alert-display-seconds", type=float, default=ALERT_DISPLAY_SECONDS,
                      help="How long a confirmed alert stays shown in the on-screen panel.")
     args = ap.parse_args()
@@ -74,6 +76,7 @@ def main():
 
     # Rolling window of alerts still worth showing on screen.
     active_alerts = deque()
+    speed_estimator = SpeedEstimator(manual_px_per_meter=args.px_per_meter)
 
     frame_idx = 0
     t0 = time.time()
@@ -93,7 +96,7 @@ def main():
             active_alerts.popleft()
 
         annotated = draw_overlay(frame, result["tracks"], pipeline.history,
-                                  list(active_alerts), t, px_per_meter=args.px_per_meter)
+                                  list(active_alerts), t, speed_estimator)
         writer.write(annotated)
 
         if result["confirmed_events"]:
