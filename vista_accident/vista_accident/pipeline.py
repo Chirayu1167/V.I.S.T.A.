@@ -18,6 +18,7 @@ from .alert import AlertDispatcher
 from .config import CameraConfig, DispatchConfig, HeuristicConfig
 from .confirmation import SecondaryConfirmation
 from .detector import Detector
+from .fusion import IncidentFuser
 from .heuristics import run_all_heuristics
 from .severity import SeverityAssessor, SeverityConfig
 from .track_history import TrackHistory
@@ -44,6 +45,7 @@ class AccidentPipeline:
         self.tracker = tracker or Tracker(frame_rate=int(fps_hint))
         self.history = TrackHistory(history_seconds=self.cfg.history_seconds, assumed_fps=fps_hint)
         self.verifier = Verifier(self.cfg)
+        self.fuser = IncidentFuser()
         self.severity = SeverityAssessor(severity_cfg)
         self.secondary = secondary or SecondaryConfirmation(weights_path=None)
         self.dispatcher = AlertDispatcher(self.camera_cfg, self.dispatch_cfg)
@@ -68,7 +70,8 @@ class AccidentPipeline:
 
         raw_triggers = run_all_heuristics(self.history, t, self.cfg,
                                            stop_zones=self.camera_cfg.stop_zones)
-        confirmed_events = self.verifier.process(t, raw_triggers)
+        confirmed_events = self.fuser.process(
+            t, self.verifier.process(t, raw_triggers))
 
         alerts = []
         for event in confirmed_events:

@@ -86,12 +86,15 @@ def main():
             all_events.append(ev)
 
     print(f"\nTotal confirmed events: {len(all_events)}")
-    print(f"Total dispatched alerts: {sum(1 for _, _, s in pipeline.confirmed_log if s == 'dispatched')}")
+    dispatched = sum(1 for _, _, s in pipeline.confirmed_log if s == "dispatched")
+    print(f"Total dispatched alerts: {dispatched}")
     kinds = sorted(set(e.kind for e in all_events))
     print(f"Event kinds triggered: {kinds}")
-    assert "speed_drop" in kinds, "expected speed_drop to fire on sudden stop"
-    assert "collision" in kinds, "expected collision to fire when both cars stop overlapping"
-    print("\n✅ scenario test passed")
+    assert "collision" in kinds, "expected collision to fire on impact signature"
+    # The post-crash speed drops and the collision are the SAME physical
+    # incident — fusion must collapse them into a single dispatched alert.
+    assert dispatched == 1, "expected collision + speed drops to fuse into ONE incident"
+    print("\n\u2705 scenario test passed")
 
 
 if __name__ == "__main__":
