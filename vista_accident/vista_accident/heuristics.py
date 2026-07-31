@@ -28,20 +28,30 @@ class RawTrigger:
         return f"{self.kind}:{'-'.join(str(i) for i in sorted(self.track_ids))}"
 
 
-def check_speed_drop(history: TrackHistory, t: float, cfg: HeuristicConfig) -> List[RawTrigger]:
+def check_speed_drop(history: TrackHistory, t: float, cfg: HeuristicConfig,
+                     stop_zones=None) -> List[RawTrigger]:
     triggers = []
+    stop_zones = stop_zones or []
     for tid in history.active_ids(cls_filter=VEHICLE_CLASSES):
-        prior_v = history.velocity(tid, cfg.speed_drop_window_s)
-        now_v = history.instantaneous_velocity(tid)
+        # Both readings are windowed averages (previous window vs. current
+        # window) instead of raw instantaneous velocity, so a single jittery
+        # tracker frame cannot fake a "drop".
+        now_v = history.velocity_between(tid, t - cfg.speed_drop_window_s, t)
+        prior_v = history.velocity_between(
+            tid, t - 2 * cfg.speed_drop_window_s, t - cfg.speed_drop_window_s)
         if prior_v is None or now_v is None:
             continue
         if prior_v < cfg.speed_drop_min_prior_speed:
             continue  # was already slow/stationary — not a meaningful "drop"
+        p = history.latest(tid)
+        if p and _in_any_zone((p.cx, p.cy), stop_zones):
+            continue  # legitimate braking at an intersection/bus stop — suppress
         drop_ratio = (prior_v - now_v) / prior_v
         if drop_ratio > cfg.speed_drop_ratio:
             triggers.append(RawTrigger(
                 kind="speed_drop", track_ids=(tid,), t=t,
-                meta={"prior_v": prior_v, "now_v": now_v, "drop_ratio": drop_ratio},
+                meta={"prior_v": prior_v, "now_v": now_v, "drop_ratio": drop_ratio,
+                      "cx": p.cx, "cy": p.cy},
             ))
     return triggers
 
@@ -82,7 +92,7 @@ def check_anomaly_stop(history: TrackHistory, t: float, cfg: HeuristicConfig, st
             continue  # legitimate stop (intersection/bus stop) — suppress
         triggers.append(RawTrigger(
             kind="anomaly_stop", track_ids=(tid,), t=t,
-            meta={"duration": duration},
+            meta={"duration": duration, "cx": p.cx, "cy": p.cy},
         ))
     return triggers
 
@@ -111,7 +121,8 @@ def check_hit_and_run(history: TrackHistory, t: float, cfg: HeuristicConfig) -> 
             if ped_drop > cfg.hitrun_ped_velocity_drop and v_now > cfg.hitrun_vehicle_continues_min_speed:
                 triggers.append(RawTrigger(
                     kind="hit_and_run", track_ids=(vid, pid), t=t,
-                    meta={"iou": iou, "ped_drop": ped_drop, "vehicle_v": v_now},
+                    meta={"iou": iou, "ped_drop": ped_drop, "vehicle_v": v_now,
+                          "cx": pv.cx, "cy": pv.cy},
                 ))
     return triggers
 
@@ -138,7 +149,7 @@ def _in_any_zone(point, zones) -> bool:
 
 def run_all_heuristics(history: TrackHistory, t: float, cfg: HeuristicConfig, stop_zones=None) -> List[RawTrigger]:
     triggers = []
-    triggers += check_speed_drop(history, t, cfg)
+    triggers += check_speed_drop(history, t, cfg, stop_zones=stop_zones)
     triggers += check_collision(history, t, cfg)
     triggers += check_anomaly_stop(history, t, cfg, stop_zones=stop_zones)
     triggers += check_hit_and_run(history, t, cfg)

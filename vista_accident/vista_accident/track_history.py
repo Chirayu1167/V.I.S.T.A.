@@ -91,6 +91,18 @@ class TrackHistory:
         dt = latest.t - past.t
         return dist / dt if dt > 0 else None
 
+    def velocity_between(self, track_id: int, t0: float, t1: float) -> Optional[float]:
+        """Average speed (px/s) between two (backward-looking) timestamps.
+        Both points are the last recorded point at or before each timestamp,
+        so the window is robust to per-frame tracker jitter."""
+        p2 = self.point_near(track_id, t1)
+        p1 = self.point_near(track_id, t0)
+        if not p1 or not p2 or p1.t == p2.t:
+            return None
+        dist = ((p2.cx - p1.cx) ** 2 + (p2.cy - p1.cy) ** 2) ** 0.5
+        dt = p2.t - p1.t
+        return dist / dt if dt > 0 else None
+
     def instantaneous_velocity(self, track_id: int) -> Optional[float]:
         buf = self.tracks.get(track_id)
         if not buf or len(buf) < 2:

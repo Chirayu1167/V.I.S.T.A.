@@ -24,6 +24,7 @@ handles both identically.
 """
 
 import argparse
+import json
 import time
 from collections import deque
 
@@ -50,6 +51,10 @@ def main():
                           "less precise than a real calibration, but always shown in km/h.")
     ap.add_argument("--alert-display-seconds", type=float, default=ALERT_DISPLAY_SECONDS,
                      help="How long a confirmed alert stays shown in the on-screen panel.")
+    ap.add_argument("--stop-zones-json", default=None,
+                     help="Optional JSON file with a list of stop-zone polygons "
+                          "(each: [[x,y],...]) where vehicles legitimately stop "
+                          "(intersections, bus stops) — suppresses speed_drop/anomaly_stop there.")
     args = ap.parse_args()
 
     cap = cv2.VideoCapture(args.source)
@@ -63,10 +68,16 @@ def main():
     from vista_accident.detector import Detector
     from vista_accident.confirmation import SecondaryConfirmation
 
+    stop_zones = []
+    if args.stop_zones_json:
+        with open(args.stop_zones_json) as f:
+            stop_zones = json.load(f)
+
     pipeline = AccidentPipeline(
         detector=Detector(device=args.device),
         heuristic_cfg=HeuristicConfig(),
-        camera_cfg=CameraConfig(camera_id=args.camera_id, location_name=args.location),
+        camera_cfg=CameraConfig(camera_id=args.camera_id, location_name=args.location,
+                                stop_zones=stop_zones),
         dispatch_cfg=DispatchConfig(dashboard_log_path="alerts.jsonl"),
         secondary=SecondaryConfirmation(weights_path=args.secondary_weights, device=args.device),
         fps_hint=fps,
