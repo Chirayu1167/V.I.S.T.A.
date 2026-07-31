@@ -36,9 +36,16 @@ class HeuristicConfig:
     speed_drop_ratio: float = 0.8         # >80% velocity drop within window
     speed_drop_min_prior_speed: float = 40.0  # px/s — ignore tracks that were already ~stationary
 
-    # --- Signal 2: collision (two tracks overlap + both near-zero velocity) ---
-    collision_iou_threshold: float = 0.3
-    collision_max_velocity: float = 15.0  # px/s, "near-zero"
+    # --- Signal 2: collision (two tracks overlap + impact signature) ---
+    # "Impact signature" = at least one vehicle was moving meaningfully before
+    # the overlap and its speed collapsed at the moment of overlap (either
+    # stopped outright or lost a large share of its speed). This replaces the
+    # old "both tracks near-zero velocity" rule, which only fired AFTER both
+    # vehicles had already stopped (and fired on parked cars touching).
+    collision_iou_threshold: float = 0.45
+    collision_max_velocity: float = 15.0  # px/s, "stopped at overlap" cap
+    collision_min_prior_speed: float = 60.0  # px/s, must have been moving this fast before overlap
+    collision_decel_ratio: float = 0.65  # must lose >65% of pre-overlap speed
 
     # --- Signal 3: anomaly stop (stopped mid-road, not at a known stop zone) ---
     anomaly_stop_duration_s: float = 2.0

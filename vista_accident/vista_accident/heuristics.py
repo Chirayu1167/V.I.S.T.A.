@@ -56,6 +56,19 @@ def check_speed_drop(history: TrackHistory, t: float, cfg: HeuristicConfig,
     return triggers
 
 
+def _impacted(prior_v, now_v, cfg: HeuristicConfig) -> bool:
+    """Impact signature for one vehicle: it was moving meaningfully before the
+    overlap and its speed collapsed at the moment of overlap. A car that was
+    already slow/stationary before (parked, queued) does NOT count."""
+    if prior_v is None or now_v is None:
+        return False
+    if prior_v < cfg.collision_min_prior_speed:
+        return False  # was already slow/stationary — parked cars don't crash
+    stopped = now_v <= cfg.collision_max_velocity
+    collapsed = now_v < prior_v * (1.0 - cfg.collision_decel_ratio)
+    return stopped or collapsed
+
+
 def check_collision(history: TrackHistory, t: float, cfg: HeuristicConfig) -> List[RawTrigger]:
     triggers = []
     vehicle_ids = history.active_ids(cls_filter=VEHICLE_CLASSES)
@@ -68,15 +81,18 @@ def check_collision(history: TrackHistory, t: float, cfg: HeuristicConfig) -> Li
             iou = TrackHistory.iou(pa.bbox, pb.bbox)
             if iou < cfg.collision_iou_threshold:
                 continue
-            va = history.instantaneous_velocity(id_a)
-            vb = history.instantaneous_velocity(id_b)
-            if va is None or vb is None:
+            prior_a = history.velocity(id_a, cfg.speed_drop_window_s)
+            prior_b = history.velocity(id_b, cfg.speed_drop_window_s)
+            now_a = history.instantaneous_velocity(id_a)
+            now_b = history.instantaneous_velocity(id_b)
+            if not (_impacted(prior_a, now_a, cfg) or _impacted(prior_b, now_b, cfg)):
                 continue
-            if va <= cfg.collision_max_velocity and vb <= cfg.collision_max_velocity:
-                triggers.append(RawTrigger(
-                    kind="collision", track_ids=(id_a, id_b), t=t,
-                    meta={"iou": iou, "v_a": va, "v_b": vb},
-                ))
+            triggers.append(RawTrigger(
+                kind="collision", track_ids=(id_a, id_b), t=t,
+                meta={"iou": iou, "v_a": now_a, "v_b": now_b,
+                      "prior_v_a": prior_a, "prior_v_b": prior_b,
+                      "cx": (pa.cx + pb.cx) / 2.0, "cy": (pa.cy + pb.cy) / 2.0},
+            ))
     return triggers
 
 
