@@ -73,6 +73,7 @@ def main():
         camera_cfg=CameraConfig(camera_id="TEST-CAM"),
         dispatch_cfg=DispatchConfig(dashboard_log_path="test_alerts.jsonl"),
         fps_hint=FPS,
+        use_ml_speed=False,
     )
     pipeline.detector.script = build_collision_script()
 

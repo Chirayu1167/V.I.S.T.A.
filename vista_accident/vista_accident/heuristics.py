@@ -6,6 +6,8 @@ layer sitting on top of detection + tracking).
 Each function returns a list of RawTrigger — one per frame call. These feed
 into verification.Verifier, which requires a signal to persist across
 consecutive frames before it becomes a confirmed alert.
+
+Now supports ML-based speed estimation for real-world speeds (m/s, km/h).
 """
 
 from dataclasses import dataclass, field
@@ -13,6 +15,7 @@ from typing import List, Tuple
 
 from .config import HeuristicConfig, PERSON_CLASSES, VEHICLE_CLASSES
 from .track_history import TrackHistory
+from .speed_estimator import TrackSpeed
 
 
 @dataclass
@@ -48,10 +51,17 @@ def check_speed_drop(history: TrackHistory, t: float, cfg: HeuristicConfig,
             continue  # legitimate braking at an intersection/bus stop — suppress
         drop_ratio = (prior_v - now_v) / prior_v
         if drop_ratio > cfg.speed_drop_ratio:
+            # Include ML speed details if available
+            ml_speed = history.get_ml_speed(tid)
+            meta = {"prior_v": prior_v, "now_v": now_v, "drop_ratio": drop_ratio,
+                    "cx": p.cx, "cy": p.cy}
+            if ml_speed:
+                meta["ml_speed_mps"] = ml_speed.speed_mps
+                meta["ml_speed_kmph"] = ml_speed.speed_kmph
+                meta["ml_world_pos"] = ml_speed.world_pos
             triggers.append(RawTrigger(
                 kind="speed_drop", track_ids=(tid,), t=t,
-                meta={"prior_v": prior_v, "now_v": now_v, "drop_ratio": drop_ratio,
-                      "cx": p.cx, "cy": p.cy},
+                meta=meta,
             ))
     return triggers
 
@@ -87,11 +97,21 @@ def check_collision(history: TrackHistory, t: float, cfg: HeuristicConfig) -> Li
             now_b = history.instantaneous_velocity(id_b)
             if not (_impacted(prior_a, now_a, cfg) or _impacted(prior_b, now_b, cfg)):
                 continue
+            # Include ML speed details if available
+            ml_a = history.get_ml_speed(id_a)
+            ml_b = history.get_ml_speed(id_b)
+            meta = {"iou": iou, "v_a": now_a, "v_b": now_b,
+                    "prior_v_a": prior_a, "prior_v_b": prior_b,
+                    "cx": (pa.cx + pb.cx) / 2.0, "cy": (pa.cy + pb.cy) / 2.0}
+            if ml_a:
+                meta["ml_a_speed_mps"] = ml_a.speed_mps
+                meta["ml_a_speed_kmph"] = ml_a.speed_kmph
+            if ml_b:
+                meta["ml_b_speed_mps"] = ml_b.speed_mps
+                meta["ml_b_speed_kmph"] = ml_b.speed_kmph
             triggers.append(RawTrigger(
                 kind="collision", track_ids=(id_a, id_b), t=t,
-                meta={"iou": iou, "v_a": now_a, "v_b": now_b,
-                      "prior_v_a": prior_a, "prior_v_b": prior_b,
-                      "cx": (pa.cx + pb.cx) / 2.0, "cy": (pa.cy + pb.cy) / 2.0},
+                meta=meta,
             ))
     return triggers
 
@@ -106,9 +126,15 @@ def check_anomaly_stop(history: TrackHistory, t: float, cfg: HeuristicConfig, st
         p = history.latest(tid)
         if p and _in_any_zone((p.cx, p.cy), stop_zones):
             continue  # legitimate stop (intersection/bus stop) — suppress
+        ml_speed = history.get_ml_speed(tid)
+        meta = {"duration": duration, "cx": p.cx, "cy": p.cy}
+        if ml_speed:
+            meta["ml_speed_mps"] = ml_speed.speed_mps
+            meta["ml_speed_kmph"] = ml_speed.speed_kmph
+            meta["ml_world_pos"] = ml_speed.world_pos
         triggers.append(RawTrigger(
             kind="anomaly_stop", track_ids=(tid,), t=t,
-            meta={"duration": duration, "cx": p.cx, "cy": p.cy},
+            meta=meta,
         ))
     return triggers
 
@@ -135,10 +161,19 @@ def check_hit_and_run(history: TrackHistory, t: float, cfg: HeuristicConfig) -> 
                 continue
             ped_drop = (prior_ped_v - now_ped_v) / prior_ped_v
             if ped_drop > cfg.hitrun_ped_velocity_drop and v_now > cfg.hitrun_vehicle_continues_min_speed:
+                ml_v = history.get_ml_speed(vid)
+                ml_p = history.get_ml_speed(pid)
+                meta = {"iou": iou, "ped_drop": ped_drop, "vehicle_v": v_now,
+                        "cx": pv.cx, "cy": pv.cy}
+                if ml_v:
+                    meta["ml_vehicle_speed_mps"] = ml_v.speed_mps
+                    meta["ml_vehicle_speed_kmph"] = ml_v.speed_kmph
+                if ml_p:
+                    meta["ml_ped_speed_mps"] = ml_p.speed_mps
+                    meta["ml_ped_speed_kmph"] = ml_p.speed_kmph
                 triggers.append(RawTrigger(
                     kind="hit_and_run", track_ids=(vid, pid), t=t,
-                    meta={"iou": iou, "ped_drop": ped_drop, "vehicle_v": v_now,
-                          "cx": pv.cx, "cy": pv.cy},
+                    meta=meta,
                 ))
     return triggers
 

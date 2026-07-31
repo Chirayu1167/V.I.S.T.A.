@@ -35,7 +35,7 @@ class HeuristicConfig:
     # --- Signal 1: speed drop ---
     speed_drop_window_s: float = 0.5      # look-back window for velocity comparison
     speed_drop_ratio: float = 0.8         # >80% velocity drop within window
-    speed_drop_min_prior_speed: float = 40.0  # px/s — ignore tracks that were already ~stationary
+    speed_drop_min_prior_speed: float = 11.0  # m/s (~40 km/h) — ignore tracks that were already ~stationary
 
     # --- Signal 2: collision (two tracks overlap + impact signature) ---
     # "Impact signature" = at least one vehicle was moving meaningfully before
@@ -44,18 +44,18 @@ class HeuristicConfig:
     # old "both tracks near-zero velocity" rule, which only fired AFTER both
     # vehicles had already stopped (and fired on parked cars touching).
     collision_iou_threshold: float = 0.45
-    collision_max_velocity: float = 15.0  # px/s, "stopped at overlap" cap
-    collision_min_prior_speed: float = 60.0  # px/s, must have been moving this fast before overlap
+    collision_max_velocity: float = 4.0  # m/s (~15 km/h), "stopped at overlap" cap
+    collision_min_prior_speed: float = 16.5  # m/s (~60 km/h), must have been moving this fast before overlap
     collision_decel_ratio: float = 0.65  # must lose >65% of pre-overlap speed
 
     # --- Signal 3: anomaly stop (stopped mid-road, not at a known stop zone) ---
     anomaly_stop_duration_s: float = 2.0
-    anomaly_stop_max_velocity: float = 10.0  # px/s
+    anomaly_stop_max_velocity: float = 2.8  # m/s (~10 km/h)
 
     # --- Signal 4: hit-and-run (vehicle-pedestrian intersection + ped velocity crash) ---
     hitrun_iou_threshold: float = 0.15
     hitrun_ped_velocity_drop: float = 0.9   # >90% drop
-    hitrun_vehicle_continues_min_speed: float = 20.0  # px/s, vehicle keeps moving after
+    hitrun_vehicle_continues_min_speed: float = 5.5  # m/s (~20 km/h), vehicle keeps moving after
 
     # --- Verification (per-branch, across consecutive frames) ---
     verify_window_frames: int = 5           # default: must trigger in this many consecutive checks
@@ -77,6 +77,30 @@ class CameraConfig:
     # Optional: polygon of known "stop zones" (intersections, bus stops) in pixel
     # coords, where a stationary vehicle should NOT trigger anomaly_stop.
     stop_zones: list = field(default_factory=list)
+    
+    # --- Camera calibration for ML-based speed estimation ---
+    # meter_per_pixel: simple scale factor (fallback if no homography)
+    meter_per_pixel: float = 0.05
+    # camera_height_m: camera height above ground (meters)
+    camera_height_m: float = 8.0
+    # camera_pitch_deg: camera pitch angle downward from horizontal (degrees)
+    camera_pitch_deg: float = 45.0
+    # homography_src_points: 4 source points in image (pixels) for perspective transform
+    # Format: [(x1,y1), (x2,y2), (x3,y3), (x4,y4)] - corners of known ground rectangle
+    homography_src_points: list = field(default_factory=list)
+    # homography_dst_points: 4 destination points in real-world (meters)
+    # Format: [(x1,y1), (x2,y2), (x3,y3), (x4,y4)] - corresponding ground rectangle
+    homography_dst_points: list = field(default_factory=list)
+    
+    # --- ML Speed Estimator settings ---
+    # fps: video frame rate (used for time calculations)
+    fps: float = 25.0
+    # speed_max_history: frames of history before speed is locked
+    speed_max_history: int = 15
+    # speed_min_history: minimum frames before speed is computed
+    speed_min_history: int = 5
+    # speed_max_kmph: maximum plausible speed for outlier filtering
+    speed_max_kmph: float = 150.0
 
 
 @dataclass

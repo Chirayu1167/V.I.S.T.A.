@@ -4,10 +4,14 @@ Rolling per-track history: {track_id: deque[(t, cx, cy, bbox, cls)]}
 This is the shared data structure every heuristic reads from. Keeping it
 separate from the tracker means we can swap ByteTrack for any other tracker
 without touching heuristic logic.
+
+Now supports optional ML-based speed estimator for real-world speed (m/s, km/h).
 """
 
 from collections import deque, namedtuple
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
+
+from .speed_estimator import MlSpeedEstimator, TrackSpeed
 
 TrackPoint = namedtuple("TrackPoint", ["t", "cx", "cy", "bbox", "cls"])
 
@@ -33,18 +37,35 @@ def _iou(box_a, box_b) -> float:
 
 
 class TrackHistory:
-    """Stores a rolling time-window of positions for every active track id."""
+    """Stores a rolling time-window of positions for every active track id.
+    
+    Can optionally use an MlSpeedEstimator for real-world speed estimation.
+    If no estimator is provided, falls back to pixel-based velocity calculations.
+    """
 
-    def __init__(self, history_seconds: float = 3.0, assumed_fps: float = 25.0):
+    def __init__(
+        self,
+        history_seconds: float = 3.0,
+        assumed_fps: float = 25.0,
+        speed_estimator: Optional[MlSpeedEstimator] = None,
+    ):
         self.history_seconds = history_seconds
+        self.assumed_fps = assumed_fps
+        self.speed_estimator = speed_estimator
         # Generous buffer length; actual retention is time-based via prune().
         self._maxlen = max(30, int(history_seconds * assumed_fps * 2))
         self.tracks: Dict[int, deque] = {}
         self.last_seen: Dict[int, float] = {}
 
-    def update(self, t: float, detections: List[Tuple[int, Tuple[float, float, float, float], int]]):
+    def update(
+        self,
+        t: float,
+        detections: List[Tuple[int, Tuple[float, float, float, float], int]],
+        frame: Optional[object] = None,  # np.ndarray for ML estimator
+    ):
         """
         detections: list of (track_id, bbox_xyxy, class_id)
+        frame: optional frame for ML-based speed estimation
         """
         seen_ids = set()
         for track_id, bbox, cls in detections:
@@ -53,6 +74,11 @@ class TrackHistory:
             buf.append(TrackPoint(t, cx, cy, bbox, cls))
             self.last_seen[track_id] = t
             seen_ids.add(track_id)
+        
+        # Update ML speed estimator if provided and frame available
+        if self.speed_estimator is not None and frame is not None:
+            self.speed_estimator.update(frame)
+        
         self._prune(t)
 
     def _prune(self, now: float):
@@ -79,7 +105,15 @@ class TrackHistory:
         return best or buf[0]
 
     def velocity(self, track_id: int, window_s: float) -> Optional[float]:
-        """Average speed (px/s) over the last `window_s` seconds."""
+        """Average speed (m/s) over the last `window_s` seconds.
+        
+        Uses ML estimator if available, otherwise falls back to pixel-based.
+        """
+        # Prefer ML estimator for real-world speeds
+        if self.speed_estimator is not None:
+            return self.speed_estimator.velocity(track_id, window_s)
+        
+        # Fallback: pixel-based
         buf = self.tracks.get(track_id)
         if not buf or len(buf) < 2:
             return None
@@ -92,9 +126,11 @@ class TrackHistory:
         return dist / dt if dt > 0 else None
 
     def velocity_between(self, track_id: int, t0: float, t1: float) -> Optional[float]:
-        """Average speed (px/s) between two (backward-looking) timestamps.
-        Both points are the last recorded point at or before each timestamp,
-        so the window is robust to per-frame tracker jitter."""
+        """Average speed (m/s) between two (backward-looking) timestamps.
+        Uses ML estimator if available, otherwise falls back to pixel-based."""
+        if self.speed_estimator is not None:
+            return self.speed_estimator.velocity_between(track_id, t0, t1)
+        
         p2 = self.point_near(track_id, t1)
         p1 = self.point_near(track_id, t0)
         if not p1 or not p2 or p1.t == p2.t:
@@ -104,6 +140,10 @@ class TrackHistory:
         return dist / dt if dt > 0 else None
 
     def instantaneous_velocity(self, track_id: int) -> Optional[float]:
+        """Instantaneous velocity (m/s). Uses ML estimator if available."""
+        if self.speed_estimator is not None:
+            return self.speed_estimator.instantaneous_velocity(track_id)
+        
         buf = self.tracks.get(track_id)
         if not buf or len(buf) < 2:
             return None
@@ -115,7 +155,10 @@ class TrackHistory:
         return dist / dt
 
     def stationary_duration(self, track_id: int, max_velocity: float) -> float:
-        """How long (seconds) the track has stayed below max_velocity, ending now."""
+        """How long (seconds) the track has stayed below max_velocity (m/s), ending now."""
+        if self.speed_estimator is not None:
+            return self.speed_estimator.stationary_duration(track_id, max_velocity)
+        
         buf = self.tracks.get(track_id)
         if not buf or len(buf) < 2:
             return 0.0
@@ -145,6 +188,18 @@ class TrackHistory:
             if p and p.cls in cls_filter:
                 out.append(tid)
         return out
+
+    def get_ml_speed(self, track_id: int) -> Optional[TrackSpeed]:
+        """Get ML-based speed estimate with full details (m/s, km/h, world position)."""
+        if self.speed_estimator is not None:
+            return self.speed_estimator.get_speed(track_id)
+        return None
+
+    def get_all_ml_speeds(self) -> Dict[int, TrackSpeed]:
+        """Get all ML-based speed estimates."""
+        if self.speed_estimator is not None:
+            return self.speed_estimator.get_all_speeds()
+        return {}
 
     @staticmethod
     def iou(box_a, box_b) -> float:

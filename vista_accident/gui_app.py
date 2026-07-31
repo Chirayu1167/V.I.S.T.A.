@@ -30,9 +30,9 @@ from datetime import datetime
 
 import cv2
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QImage, QPixmap, QFont
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Qt, QThread, Signal as pyqtSignal
+from PySide6.QtGui import QImage, QPixmap, QFont
+from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton, QVBoxLayout,
     QHBoxLayout, QFileDialog, QScrollArea, QFrame, QProgressBar, QComboBox,
     QDoubleSpinBox, QSizePolicy, QDialog, QMessageBox, QGroupBox,
@@ -80,10 +80,10 @@ QScrollArea { border: none; }
 def bgr_to_qpixmap(frame, target_w=None):
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     h, w, ch = rgb.shape
-    qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+    qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
     pix = QPixmap.fromImage(qimg)
     if target_w:
-        pix = pix.scaledToWidth(target_w, Qt.SmoothTransformation)
+        pix = pix.scaledToWidth(target_w, Qt.TransformationMode.SmoothTransformation)
     return pix
 
 
@@ -249,8 +249,8 @@ class Thumb(QLabel):
         self.setFixedSize(*size)
         self.setScaledContents(True)
         self.setStyleSheet("background-color: #101012; border-radius: 3px; color: #555;")
-        self.setAlignment(Qt.AlignCenter)
-        self.setCursor(Qt.PointingHandCursor)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.mousePressEvent = self._open
         self.set_path(path)
 
@@ -269,12 +269,12 @@ class Thumb(QLabel):
         dlg.setWindowTitle("Screenshot")
         pix = QPixmap(self._path)
         if pix.width() > 900:
-            pix = pix.scaledToWidth(900, Qt.SmoothTransformation)
+            pix = pix.scaledToWidth(900, Qt.TransformationMode.SmoothTransformation)
         lbl = QLabel()
         lbl.setPixmap(pix)
         lay = QVBoxLayout(dlg)
         lay.addWidget(lbl)
-        dlg.exec_()
+        dlg.exec()
 
 
 class AlertCard(QFrame):
@@ -299,7 +299,7 @@ class AlertCard(QFrame):
             f"<b>{payload.kind.replace('_', ' ').title()}</b> &nbsp; "
             f"<span style='color:{hex_color}; font-weight:600;'>{payload.severity.upper()}</span>"
         )
-        title.setTextFormat(Qt.RichText)
+        title.setTextFormat(Qt.TextFormat.RichText)
         outer.addWidget(title)
 
         ts = datetime.now().strftime("%H:%M:%S")
@@ -322,7 +322,7 @@ class AlertCard(QFrame):
             col.setSpacing(2)
             col.addWidget(thumb)
             cap = QLabel(lbl)
-            cap.setAlignment(Qt.AlignCenter)
+            cap.setAlignment(Qt.AlignmentFlag.AlignCenter)
             cap.setStyleSheet("color: #6f6f75; font-size: 9.5px;")
             col.addWidget(cap)
             strip.addLayout(col)
@@ -404,7 +404,7 @@ class MainWindow(QMainWindow):
         left.addWidget(controls_box)
 
         self.video_label = QLabel("Upload a video to begin analysis.")
-        self.video_label.setAlignment(Qt.AlignCenter)
+        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setStyleSheet(
             "background-color: #0e0e10; color: #6a6a70; border-radius: 6px;"
         )
@@ -558,7 +558,7 @@ def main():
     app.setStyleSheet(STYLE_SHEET)
     win = MainWindow()
     win.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

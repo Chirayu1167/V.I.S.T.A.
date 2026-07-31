@@ -21,6 +21,7 @@ from .detector import Detector
 from .fusion import IncidentFuser
 from .heuristics import run_all_heuristics
 from .severity import SeverityAssessor, SeverityConfig
+from .speed_estimator import MlSpeedEstimator, create_speed_estimator_from_config
 from .track_history import TrackHistory
 from .tracker import Tracker
 from .verification import Verifier
@@ -36,14 +37,25 @@ class AccidentPipeline:
                  secondary: Optional[SecondaryConfirmation] = None,
                  severity_cfg: Optional[SeverityConfig] = None,
                  clip_buffer_seconds: float = 4.0,
-                 fps_hint: float = 25.0):
+                 fps_hint: float = 25.0,
+                 use_ml_speed: bool = True):
         self.cfg = heuristic_cfg or HeuristicConfig()
         self.camera_cfg = camera_cfg or CameraConfig()
         self.dispatch_cfg = dispatch_cfg or DispatchConfig()
 
         self.detector = detector or Detector()
         self.tracker = tracker or Tracker(frame_rate=int(fps_hint))
-        self.history = TrackHistory(history_seconds=self.cfg.history_seconds, assumed_fps=fps_hint)
+        
+        # Initialize ML speed estimator if enabled
+        self.speed_estimator = None
+        if use_ml_speed:
+            self.speed_estimator = create_speed_estimator_from_config(self.camera_cfg)
+        
+        self.history = TrackHistory(
+            history_seconds=self.cfg.history_seconds, 
+            assumed_fps=fps_hint,
+            speed_estimator=self.speed_estimator
+        )
         self.verifier = Verifier(self.cfg)
         self.fuser = IncidentFuser()
         self.severity = SeverityAssessor(severity_cfg)
@@ -59,14 +71,15 @@ class AccidentPipeline:
     def process_frame(self, frame: np.ndarray, t: float) -> dict:
         """
         Runs one frame through the full accident branch.
-        Returns {"tracks": [...], "confirmed_events": [...], "alerts": [...]}
+        Returns {"tracks": [...], "confirmed_events": [...], "alerts": [...], "speeds": {...}}
         """
         self.frame_count += 1
         self._clip_buffer.append(frame.copy())
 
         detections = self.detector.detect(frame)                # (bbox, conf, cls)
         tracks = self.tracker.update(detections)                # (track_id, bbox, cls)
-        self.history.update(t, [(tid, bbox, cls) for tid, bbox, cls in tracks])
+        # Pass frame to history for ML speed estimation
+        self.history.update(t, [(tid, bbox, cls) for tid, bbox, cls in tracks], frame=frame)
 
         raw_triggers = run_all_heuristics(self.history, t, self.cfg,
                                            stop_zones=self.camera_cfg.stop_zones)
@@ -88,4 +101,14 @@ class AccidentPipeline:
             alerts.append(payload)
             self.confirmed_log.append((event, secondary_result, "dispatched"))
 
-        return {"tracks": tracks, "confirmed_events": confirmed_events, "alerts": alerts}
+        # Include ML speed estimates in output
+        speeds = {}
+        if self.speed_estimator:
+            speeds = self.speed_estimator.get_all_speeds()
+
+        return {
+            "tracks": tracks, 
+            "confirmed_events": confirmed_events, 
+            "alerts": alerts,
+            "speeds": speeds
+        }
