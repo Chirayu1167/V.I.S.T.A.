@@ -1,7 +1,10 @@
 """
-Thin wrapper around Ultralytics YOLOv8n (COCO-pretrained) restricted to the
+Thin wrapper around Ultralytics YOLO11m (COCO-pretrained) restricted to the
 classes we care about (vehicles + persons/cyclists). FP16 inference on GPU
 per the "GPU-optimized inference" feature in VISTA.md.
+
+yolo11m chosen over yolov8n after benchmarking on demo footage: ~+79% more
+detections per frame (small/distant vehicles) at ~66 fps on an RTX 3050.
 """
 
 from typing import List, Tuple
@@ -12,7 +15,7 @@ from .config import ALL_TRACKED_CLASSES
 
 
 class Detector:
-    def __init__(self, weights: str = "yolov8n.pt", device: str = "cuda", half: bool = True,
+    def __init__(self, weights: str = "yolo11m.pt", device: str = "cuda", half: bool = True,
                  conf_threshold: float = 0.35, classes=None):
         from ultralytics import YOLO
         self.model = YOLO(weights)
