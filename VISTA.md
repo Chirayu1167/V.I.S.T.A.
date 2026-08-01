@@ -77,8 +77,8 @@ CCTV frame
     │
     ▼
 ┌──────────────────────────────┐
-│ YOLOv8n (COCO pretrained)    │ ← detects vehicles + persons/cyclists
-│ Per-frame, ~1-2ms on GPU     │   (car, truck, bus, person, bicycle, etc.)
+│ YOLO11m (COCO pretrained)     │ ← detects vehicles + persons/cyclists
+│ Per-frame, ~15ms on GPU       │   (car, truck, bus, person, bicycle, etc.)
 └──────────────┬───────────────┘
                │ bounding boxes
                ▼
@@ -149,7 +149,7 @@ Traffic Police / EMS    Police Control Room
 
 | Component | What | Source | Why |
 |---|---|---|---|
-| Vehicle & pedestrian detector | **YOLOv8n** (COCO pretrained) | [Ultralytics YOLOv8](https://huggingface.co/Ultralytics/YOLOv8) — `pip install ultralytics`, model: `yolov8n.pt` | 3.2M params, ~1-2ms per frame on GPU, detects cars/trucks/buses + persons/cyclists (80 COCO classes) |
+| Vehicle & pedestrian detector | **YOLO11m** (COCO pretrained) | [Ultralytics YOLO11](https://huggingface.co/Ultralytics/YOLO11) — `pip install ultralytics`, model: `yolo11m.pt` | ~39M params, ~66 fps on RTX 3050 (FP16, 640x360). Picked over yolov8n after benchmarking: +79% more detections/frame (small/distant vehicles) |
 | Tracker | **ByteTrack** | [github.com/ifzhang/ByteTrack](https://github.com/ifzhang/ByteTrack) — `pip install bytetrack` | State-of-the-art tracker, <1ms per frame, no GPU needed for tracking |
 | Secondary confirmation | **YOLO11x accident detector** | [HF: Enos-123/traffic-accident-detection-yolo11x](https://huggingface.co/Enos-123/traffic-accident-detection-yolo11x) | Fine-tuned on surveillance accident data; mAP@0.5: 0.826, recall: 0.855 |
 
@@ -158,7 +158,7 @@ Traffic Police / EMS    Police Control Room
 ```python
 # 1. Vehicle detection
 from ultralytics import YOLO
-detector = YOLO("yolov8n.pt")  # COCO pretrained
+detector = YOLO("yolo11m.pt")  # COCO pretrained
 results = detector(frame)       # returns boxes for cars, trucks, buses
 
 # 2. Tracking
@@ -209,3 +209,7 @@ if heuristic_triggered:
 | Date | Changes |
 |---|---|
 | 2026-07-26 | Replaced static accident model list with tracking + heuristics pipeline (YOLOv8n + ByteTrack + 4 heuristic signals + YOLO11x secondary confirmation). Added hit-and-run detection. Moved motion prefilter to violence branch only. |
+| 2026-07-29 | Implemented accident pipeline (YOLOv8n + ByteTrack + 4 heuristics + verification + dispatch). Validated with synthetic test and real video. GPU vs CPU comparison done. GPU default + CPU fallback. |
+| 2026-07-29 (later) | Replaced static kind→severity map with dynamic SeverityAssessor. Scores each event 0.0–1.0 using pre-impact speed, IoU overlap, post-impact stop, pedestrian proximity. |
+| 2026-07-31 | Added desktop GUI (`gui_app.py`, PyQt5) + shared `render.py` overlay (per-track km/h via SpeedEstimator, severity-colored alert panel). Fixed false-positive heuristics: collision impact-signature, windowed speed_drop + stop zones, per-kind verification, ID-churn dedup, incident fusion (demo1.mp4: 33 → 11 alerts). |
+| 2026-08-01 | Upgraded detector from yolov8n → yolo11m. Benchmark on demo footage (RTX 3050, FP16): yolov8n 2.23 dets/frame → yolo11n 2.81 → yolo12s 3.39 → yolo11s 3.84 → yolo11m 3.99 (66 fps). YOLO12 underperforms on small CCTV objects; yolo11m wins on recall with 2x realtime margin. |
