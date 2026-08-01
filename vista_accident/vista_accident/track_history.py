@@ -61,11 +61,16 @@ class TrackHistory:
         self,
         t: float,
         detections: List[Tuple[int, Tuple[float, float, float, float], int]],
-        frame: Optional[object] = None,  # np.ndarray for ML estimator
+        frame: Optional[object] = None,  # unused, kept for call-site compatibility
     ):
         """
         detections: list of (track_id, bbox_xyxy, class_id)
-        frame: optional frame for ML-based speed estimation
+
+        `frame` is accepted but no longer used: the speed estimator now
+        reuses these same (track_id, bbox, cls) tuples -- the ones produced
+        by the pipeline's own Tracker -- instead of re-running detection
+        internally. This keeps track IDs consistent between heuristics and
+        speed, and avoids a second GPU inference pass per frame.
         """
         seen_ids = set()
         for track_id, bbox, cls in detections:
@@ -74,11 +79,10 @@ class TrackHistory:
             buf.append(TrackPoint(t, cx, cy, bbox, cls))
             self.last_seen[track_id] = t
             seen_ids.add(track_id)
-        
-        # Update ML speed estimator if provided and frame available
-        if self.speed_estimator is not None and frame is not None:
-            self.speed_estimator.update(frame)
-        
+
+        if self.speed_estimator is not None:
+            self.speed_estimator.update(t, detections)
+
         self._prune(t)
 
     def _prune(self, now: float):

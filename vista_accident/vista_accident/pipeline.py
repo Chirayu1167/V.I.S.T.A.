@@ -78,8 +78,9 @@ class AccidentPipeline:
 
         detections = self.detector.detect(frame)                # (bbox, conf, cls)
         tracks = self.tracker.update(detections)                # (track_id, bbox, cls)
-        # Pass frame to history for ML speed estimation
-        self.history.update(t, [(tid, bbox, cls) for tid, bbox, cls in tracks], frame=frame)
+        # Speed estimation reuses these exact tracks (same detector, same
+        # track IDs) rather than re-running detection internally.
+        self.history.update(t, [(tid, bbox, cls) for tid, bbox, cls in tracks])
 
         raw_triggers = run_all_heuristics(self.history, t, self.cfg,
                                            stop_zones=self.camera_cfg.stop_zones)

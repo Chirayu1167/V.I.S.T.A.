@@ -9,7 +9,7 @@ CCTV-style overhead/angled feed.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -78,29 +78,44 @@ class CameraConfig:
     # coords, where a stationary vehicle should NOT trigger anomaly_stop.
     stop_zones: list = field(default_factory=list)
     
-    # --- Camera calibration for ML-based speed estimation ---
-    # meter_per_pixel: simple scale factor (fallback if no homography)
+    # --- Camera calibration for real-world speed estimation ---
+    # REQUIRED for accurate speeds on a fixed/angled camera: run
+    # tools/calibrate_camera.py against a frame from your actual camera to
+    # generate homography_src_points/homography_dst_points below. Without
+    # these, speed falls back to a flat meter_per_pixel scale, which is
+    # only correct for a perfectly top-down camera and will be
+    # significantly wrong for anything shot at an angle.
+    #
+    # meter_per_pixel: flat scale factor, fallback ONLY if no homography is set
     meter_per_pixel: float = 0.05
-    # camera_height_m: camera height above ground (meters)
+    # camera_height_m / camera_pitch_deg: informational, not currently used
+    # in the homography math (kept for future 3D-geometry-based calibration).
     camera_height_m: float = 8.0
-    # camera_pitch_deg: camera pitch angle downward from horizontal (degrees)
     camera_pitch_deg: float = 45.0
-    # homography_src_points: 4 source points in image (pixels) for perspective transform
-    # Format: [(x1,y1), (x2,y2), (x3,y3), (x4,y4)] - corners of known ground rectangle
+    # homography_src_points: 4+ points in image pixel coords, e.g. corners of
+    # a lane, crosswalk, or any rectangle with KNOWN real-world dimensions.
+    # Format: [(x1,y1), (x2,y2), (x3,y3), (x4,y4)]
     homography_src_points: list = field(default_factory=list)
-    # homography_dst_points: 4 destination points in real-world (meters)
-    # Format: [(x1,y1), (x2,y2), (x3,y3), (x4,y4)] - corresponding ground rectangle
+    # homography_dst_points: the SAME points' real-world coordinates in
+    # meters (e.g. measured with a tape measure / known lane width).
+    # Format: [(x1,y1), (x2,y2), (x3,y3), (x4,y4)]
     homography_dst_points: list = field(default_factory=list)
-    
-    # --- ML Speed Estimator settings ---
-    # fps: video frame rate (used for time calculations)
+
+    # --- Speed estimator settings ---
+    # fps: video frame rate (used for time-window sizing)
     fps: float = 25.0
-    # speed_max_history: frames of history before speed is locked
-    speed_max_history: int = 15
-    # speed_min_history: minimum frames before speed is computed
+    # speed_history_seconds: how much position history to keep per track;
+    # speed is fit (least-squares) over this whole window each update
+    speed_history_seconds: float = 2.0
+    # speed_min_history: minimum samples before a speed can be computed
     speed_min_history: int = 5
-    # speed_max_kmph: maximum plausible speed for outlier filtering
+    # speed_max_kmph: maximum plausible speed, used to clamp/filter outliers
     speed_max_kmph: float = 150.0
+    # speed_lock_after_seconds: if set, freeze each track's speed once it has
+    # this many seconds of history (stable "how fast was it going" number).
+    # Leave None to keep re-estimating every frame (recommended default —
+    # heuristics like sudden-deceleration detection need a live value).
+    speed_lock_after_seconds: Optional[float] = None
 
 
 @dataclass
