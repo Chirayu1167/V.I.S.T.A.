@@ -145,6 +145,19 @@ class MlSpeedEstimator:
         self.locked_tracks: set = set()
         self._last_t: float = 0.0
 
+        # Per-track constant-velocity Kalman filter state: (x, y, vx, vy).
+        # Feeds instantaneous_velocity() — the regression-over-5-samples was
+        # too jittery for collision/hit-and-run "now" readings, which caused
+        # both missed and false triggers.
+        self._kf_state: Dict[int, np.ndarray] = {}   # track_id -> 4-vector
+        self._kf_cov: Dict[int, np.ndarray] = {}     # track_id -> 4x4
+        self._kf_last_t: Dict[int, float] = {}       # track_id -> last update t
+        # Process noise (velocity random walk, m^2/s^3) and observation noise
+        # (position, m^2). Small q => the filter trusts constant motion and
+        # cleans up jitter; a real stop shows up as an immediate collapse.
+        self._kf_q = 0.3
+        self._kf_r = 0.09
+
     # -- coordinate transforms ------------------------------------------------
 
     @staticmethod
@@ -189,6 +202,8 @@ class MlSpeedEstimator:
 
             hist = self.track_histories.setdefault(track_id, deque(maxlen=self._maxlen))
             hist.append((t, wx, wy, bbox, cls))
+
+            self._kalman_update(track_id, t, wx, wy, bbox)
 
             if len(hist) >= self.min_history:
                 self._compute_speed(track_id, window_s=self.history_seconds)
@@ -254,6 +269,63 @@ class MlSpeedEstimator:
             self.locked_tracks.add(track_id)
             self.track_histories.pop(track_id, None)
 
+    def _kalman_update(self, track_id: int, t: float, wx: float, wy: float, bbox) -> None:
+        """Predict-update a per-track constant-velocity Kalman filter with the
+        observed ground-point (wx, wy). The filtered velocity becomes the
+        stable reading used by instantaneous_velocity()."""
+        prev_t = self._kf_last_t.get(track_id)
+        state = self._kf_state.get(track_id)
+        cov = self._kf_cov.get(track_id)
+
+        if state is None or cov is None or prev_t is None:
+            self._kf_state[track_id] = np.array([wx, wy, 0.0, 0.0])
+            self._kf_cov[track_id] = np.diag([1.0, 1.0, 25.0, 25.0])
+            self._kf_last_t[track_id] = t
+            return
+
+        dt = max(1e-6, t - prev_t)
+        F = np.array([
+            [1, 0, dt, 0],
+            [0, 1, 0, dt],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1],
+        ])
+        q = self._kf_q
+        G = np.array([[dt * dt / 2, 0], [0, dt * dt / 2], [dt, 0], [0, dt]])
+        Q = q * (G @ G.T)
+        H = np.array([[1, 0, 0, 0], [0, 1, 0, 0]])
+        R = np.eye(2) * self._kf_r
+
+        x_pred = F @ state
+        P_pred = F @ cov @ F.T + Q
+        z = np.array([wx, wy])
+        y = z - H @ x_pred
+        S = H @ P_pred @ H.T + R
+        # Innovation gate: a persistent large residual (a hard stop, an
+        # impact, a tracker ID jump) means the constant-motion model no
+        # longer holds — the old velocity is meaningless, so re-initialize
+        # with zero velocity and fresh covariance. The filter re-converges
+        # in a couple of frames instead of smoothing the stop away.
+        mahal = float(y @ np.linalg.inv(S) @ y)
+        if mahal > 9.0:  # >3 sigma
+            self._kf_state[track_id] = np.array([wx, wy, 0.0, 0.0])
+            self._kf_cov[track_id] = np.diag([1.0, 1.0, 25.0, 25.0])
+            self._kf_last_t[track_id] = t
+            return
+        K = P_pred @ H.T @ np.linalg.inv(S)
+        self._kf_state[track_id] = x_pred + K @ y
+        self._kf_cov[track_id] = (np.eye(4) - K @ H) @ P_pred
+        self._kf_last_t[track_id] = t
+
+    def _kalman_velocity(self, track_id: int) -> Optional[float]:
+        """Filtered instantaneous speed (m/s), or None if the filter hasn't
+        converged (track just appeared)."""
+        state = self._kf_state.get(track_id)
+        if state is None:
+            return None
+        vx, vy = state[2], state[3]
+        return float(np.hypot(vx, vy))
+
     def _age_tracks(self, current_ids: set, now: float) -> None:
         stale_ids = [
             tid for tid, hist in self.track_histories.items()
@@ -263,6 +335,9 @@ class MlSpeedEstimator:
             self.track_histories.pop(tid, None)
             self.track_speeds.pop(tid, None)
             self.locked_tracks.discard(tid)
+            self._kf_state.pop(tid, None)
+            self._kf_cov.pop(tid, None)
+            self._kf_last_t.pop(tid, None)
         for tid in list(self.track_speeds.keys()):
             if tid not in current_ids and tid not in self.track_histories and tid not in self.locked_tracks:
                 self.track_speeds.pop(tid, None)
@@ -300,6 +375,12 @@ class MlSpeedEstimator:
         return fit[0] if fit else None
 
     def instantaneous_velocity(self, track_id: int) -> Optional[float]:
+        """Kalman-filtered instantaneous speed (m/s). Falls back to a fresh
+        least-squares fit over the most recent samples only if the filter
+        hasn't seen this track yet."""
+        kf = self._kalman_velocity(track_id)
+        if kf is not None:
+            return kf
         hist = self.track_histories.get(track_id)
         if not hist or len(hist) < 2:
             speed = self.track_speeds.get(track_id)
