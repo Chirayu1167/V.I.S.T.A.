@@ -81,15 +81,17 @@ class SpeedEstimator:
         if raw_v is None:
             return self._ema.get(track_id)
 
-        if self.manual_px_per_meter:
+        if getattr(history, "speed_estimator", None) is not None:
+            kmh = raw_v * 3.6
+        elif self.manual_px_per_meter:
             px_per_m = self.manual_px_per_meter
+            kmh = (raw_v / px_per_m) * 3.6
         else:
             x1, _, x2, _ = bbox
             width_px = max(1.0, x2 - x1)
             real_w_m = REAL_WORLD_WIDTH_M.get(cls, DEFAULT_REAL_WIDTH_M)
             px_per_m = width_px / real_w_m
-
-        kmh = (raw_v / px_per_m) * 3.6
+            kmh = (raw_v / px_per_m) * 3.6
         kmh = max(0.0, min(kmh, MAX_PLAUSIBLE_KMH))
 
         prev = self._ema.get(track_id)

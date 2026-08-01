@@ -91,8 +91,13 @@ def check_collision(history: TrackHistory, t: float, cfg: HeuristicConfig) -> Li
             iou = TrackHistory.iou(pa.bbox, pb.bbox)
             if iou < cfg.collision_iou_threshold:
                 continue
-            prior_a = history.velocity(id_a, cfg.speed_drop_window_s)
-            prior_b = history.velocity(id_b, cfg.speed_drop_window_s)
+            # "Prior" speed from a pre-impact window that ends BEFORE the
+            # overlap moment; the overlap frames already contain the
+            # deceleration, which would drag the average down.
+            prior_a = history.velocity_between(
+                id_a, t - cfg.collision_prior_lookback_s, t - cfg.collision_prior_end_s)
+            prior_b = history.velocity_between(
+                id_b, t - cfg.collision_prior_lookback_s, t - cfg.collision_prior_end_s)
             now_a = history.instantaneous_velocity(id_a)
             now_b = history.instantaneous_velocity(id_b)
             if not (_impacted(prior_a, now_a, cfg) or _impacted(prior_b, now_b, cfg)):

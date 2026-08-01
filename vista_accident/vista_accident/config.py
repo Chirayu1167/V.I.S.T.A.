@@ -35,7 +35,8 @@ class HeuristicConfig:
     # --- Signal 1: speed drop ---
     speed_drop_window_s: float = 0.5      # look-back window for velocity comparison
     speed_drop_ratio: float = 0.8         # >80% velocity drop within window
-    speed_drop_min_prior_speed: float = 11.0  # m/s (~40 km/h) — ignore tracks that were already ~stationary
+    # m/s equivalents of the tuned px/s thresholds (old: 40 px/s @ 0.05 m/px).
+    speed_drop_min_prior_speed: float = 2.0  # m/s — ignore tracks that were already ~stationary
 
     # --- Signal 2: collision (two tracks overlap + impact signature) ---
     # "Impact signature" = at least one vehicle was moving meaningfully before
@@ -43,19 +44,26 @@ class HeuristicConfig:
     # stopped outright or lost a large share of its speed). This replaces the
     # old "both tracks near-zero velocity" rule, which only fired AFTER both
     # vehicles had already stopped (and fired on parked cars touching).
+    # Values = old px/s thresholds × 0.05 m/px (old: 15 / 70 px/s).
     collision_iou_threshold: float = 0.45
-    collision_max_velocity: float = 4.0  # m/s (~15 km/h), "stopped at overlap" cap
-    collision_min_prior_speed: float = 16.5  # m/s (~60 km/h), must have been moving this fast before overlap
+    collision_max_velocity: float = 0.75  # m/s (~15 px/s), "stopped at overlap" cap
+    collision_min_prior_speed: float = 3.5  # m/s (~70 px/s), must have been moving this fast before overlap
     collision_decel_ratio: float = 0.65  # must lose >65% of pre-overlap speed
+    # "prior" speed is measured over this pre-impact window, deliberately
+    # ending BEFORE the overlap moment — a window that includes the impact
+    # frames drags the average down with the deceleration and hides the
+    # signature. Window: [t - collision_prior_lookback_s, t - collision_prior_end_s].
+    collision_prior_lookback_s: float = 1.2
+    collision_prior_end_s: float = 0.2
 
     # --- Signal 3: anomaly stop (stopped mid-road, not at a known stop zone) ---
     anomaly_stop_duration_s: float = 2.0
-    anomaly_stop_max_velocity: float = 2.8  # m/s (~10 km/h)
+    anomaly_stop_max_velocity: float = 0.5  # m/s (~10 px/s)
 
     # --- Signal 4: hit-and-run (vehicle-pedestrian intersection + ped velocity crash) ---
     hitrun_iou_threshold: float = 0.15
     hitrun_ped_velocity_drop: float = 0.9   # >90% drop
-    hitrun_vehicle_continues_min_speed: float = 5.5  # m/s (~20 km/h), vehicle keeps moving after
+    hitrun_vehicle_continues_min_speed: float = 1.0  # m/s (~20 px/s), vehicle keeps moving after
 
     # --- Verification (per-branch, across consecutive frames) ---
     verify_window_frames: int = 5           # default: must trigger in this many consecutive checks
