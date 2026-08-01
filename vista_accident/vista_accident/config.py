@@ -59,6 +59,12 @@ class HeuristicConfig:
     # --- Signal 3: anomaly stop (stopped mid-road, not at a known stop zone) ---
     anomaly_stop_duration_s: float = 2.0
     anomaly_stop_max_velocity: float = 0.5  # m/s (~10 px/s)
+    # Traffic-jam suppression: if this many stationary vehicles are within
+    # traffic_jam_max_gap_m of each other (world space, needs the ML speed
+    # estimator), it's a queue at a light/jam, not an incident — no alert.
+    # Skipped (no suppression) when world positions are unavailable.
+    traffic_jam_min_vehicles: int = 3
+    traffic_jam_max_gap_m: float = 2.5
 
     # --- Signal 4: hit-and-run (vehicle-pedestrian intersection + ped velocity crash) ---
     hitrun_iou_threshold: float = 0.15

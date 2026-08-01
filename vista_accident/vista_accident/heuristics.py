@@ -121,10 +121,56 @@ def check_collision(history: TrackHistory, t: float, cfg: HeuristicConfig) -> Li
     return triggers
 
 
+def _traffic_jam_track_ids(history: TrackHistory, cfg: HeuristicConfig) -> set:
+    """Tracks that are part of a stationary queue (3+ stationary vehicles
+    within traffic_jam_max_gap_m of each other). A queue is a traffic jam or
+    a red light, not an incident, so anomaly_stop is suppressed for them.
+    Requires ML estimator world positions; returns empty otherwise."""
+    if history.speed_estimator is None:
+        return set()
+    stationary = {}
+    for tid in history.active_ids(cls_filter=VEHICLE_CLASSES):
+        v = history.instantaneous_velocity(tid)
+        if v is not None and v <= cfg.anomaly_stop_max_velocity:
+            ml = history.get_ml_speed(tid)
+            if ml is not None and ml.world_pos:
+                stationary[tid] = ml.world_pos
+    ids = list(stationary.keys())
+    parent = list(range(len(ids)))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(len(ids)):
+        for j in range(i + 1, len(ids)):
+            xi, yi = stationary[ids[i]]
+            xj, yj = stationary[ids[j]]
+            gap = ((xi - xj) ** 2 + (yi - yj) ** 2) ** 0.5
+            if gap <= cfg.traffic_jam_max_gap_m:
+                union(i, j)
+
+    sizes = {}
+    for i in range(len(ids)):
+        r = find(i)
+        sizes[r] = sizes.get(r, 0) + 1
+    return {tid for i, tid in enumerate(ids) if sizes[find(i)] >= cfg.traffic_jam_min_vehicles}
+
+
 def check_anomaly_stop(history: TrackHistory, t: float, cfg: HeuristicConfig, stop_zones=None) -> List[RawTrigger]:
     triggers = []
     stop_zones = stop_zones or []
+    jammed = _traffic_jam_track_ids(history, cfg)
     for tid in history.active_ids(cls_filter=VEHICLE_CLASSES):
+        if tid in jammed:
+            continue  # stationary queue — jam or red light, not an incident
         duration = history.stationary_duration(tid, cfg.anomaly_stop_max_velocity)
         if duration < cfg.anomaly_stop_duration_s:
             continue
