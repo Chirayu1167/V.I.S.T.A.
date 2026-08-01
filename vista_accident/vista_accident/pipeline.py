@@ -42,6 +42,7 @@ class AccidentPipeline:
         self.cfg = heuristic_cfg or HeuristicConfig()
         self.camera_cfg = camera_cfg or CameraConfig()
         self.dispatch_cfg = dispatch_cfg or DispatchConfig()
+        self.fps_hint = fps_hint
 
         self.detector = detector or Detector()
         self.tracker = tracker or Tracker(frame_rate=int(fps_hint))
@@ -68,13 +69,25 @@ class AccidentPipeline:
         self.frame_count = 0
         self.confirmed_log = []  # in-memory record for the demo/CLI summary
 
+    def _pick_impact_frame(self, event) -> Optional[np.ndarray]:
+        """The stored raw frame nearest to the moment the impact actually
+        happened (the confirmation frame is a few frames too late — the
+        crash may only be visible 1-2 frames after the trigger fired)."""
+        t_impact = event.t - (event.consecutive_frames - 1) / self.fps_hint
+        best, best_d = None, float("inf")
+        for bt, bf in self._clip_buffer:
+            d = abs(bt - t_impact)
+            if d < best_d:
+                best_d, best = d, bf
+        return best
+
     def process_frame(self, frame: np.ndarray, t: float) -> dict:
         """
         Runs one frame through the full accident branch.
         Returns {"tracks": [...], "confirmed_events": [...], "alerts": [...], "speeds": {...}}
         """
         self.frame_count += 1
-        self._clip_buffer.append(frame.copy())
+        self._clip_buffer.append((t, frame.copy()))
 
         detections = self.detector.detect(frame)                # (bbox, conf, cls)
         tracks = self.tracker.update(detections)                # (track_id, bbox, cls)
@@ -89,7 +102,13 @@ class AccidentPipeline:
 
         alerts = []
         for event in confirmed_events:
-            secondary_result = self.secondary.confirm(frame)
+            # Confirm against the stored impact frame (the moment the crash
+            # was first seen), not the current frame — by confirmation time
+            # the scene has moved on a few frames.
+            impact_frame = self._pick_impact_frame(event)
+            if impact_frame is None:
+                impact_frame = frame
+            secondary_result = self.secondary.confirm(impact_frame)
             # If secondary confirmation ran and explicitly rejected it, skip dispatch —
             # otherwise (not run, or confirmed) proceed on heuristic+verification alone.
             if secondary_result["ran"] and not secondary_result["confirmed"]:
