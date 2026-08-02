@@ -189,7 +189,7 @@ class VideoWorker(QThread):
                 raw_buffer.append((t, raw_copy))
 
                 result = pipeline.process_frame(frame, t)
-                clips_saved += result.get("clips_saved", 0)
+                clips_saved += len(result.get("clips_saved", []))
 
                 for payload in result["alerts"]:
                     if not self._passes_filter(payload.severity):
