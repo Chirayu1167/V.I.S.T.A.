@@ -19,8 +19,8 @@ Existing AI-CCTV deployments in India (iRASTE in Telangana, Safe Kerala, Delhi I
 VISTA fills that gap: not *"did someone break a rule"* but *"does someone need help right now."*
 
 - **~0.5–1 s** time-to-alert from the moment of impact
-- **6 independent accident signals**, each verified across consecutive frames to cut false positives
-- **Single-vehicle crashes** (into walls, medians) caught via jerk + smoke — not just two-car collisions
+- **4 independent accident signals**, each verified across consecutive frames to cut false positives
+- **Single-vehicle crashes** (into walls, medians) caught via abrupt speed collapse — not just two-car collisions
 - **Dynamic severity** per event → routes to the right emergency channels automatically
 
 ---
@@ -60,25 +60,24 @@ Live video (CCTV / RTSP / file)
 └──────────────┬────────────────┘
                ▼
 ┌───────────────────────────────┐
-│ 6 heuristic signals / frame   │
+│ 4 heuristic signals / frame   │
 │  speed_drop • collision       │
 │  anomaly_stop • hit_and_run   │
-│  jerk • smoke (CV)            │
 └──────────────┬────────────────┘
                ▼
 ┌───────────────────────────────┐
-│ Verification — N consecutive  │  per-kind windows (collision=3, smoke=4…)
+│ Verification — N consecutive  │  per-kind windows (collision=3)
 │ frames + spatial dedup        │  + cooldown, tracker-ID-churn handling
 └──────────────┬────────────────┘
                ▼
 ┌───────────────────────────────┐
-│ Incident fusion — one alert   │  merges related events (collision + smoke
-│ per physical crash            │  + speed_drops at one spot) into ONE incident
+│ Incident fusion — one alert   │  merges related events (collision + speed
+│ per physical crash            │  drops at one spot) into ONE incident
 └──────────────┬────────────────┘
                ▼
 ┌───────────────────────────────┐
-│ Severity assessment (0–1)     │  dynamic per event (speed, IoU, pedestrians,
-│                               │  smoke evidence) → channel routing
+│ Severity assessment (0–1)     │  dynamic per event (speed, IoU, pedestrians)
+│                               │  → channel routing
 └──────────────┬────────────────┘
                ▼
 ┌───────────────────────────────┐
@@ -100,9 +99,7 @@ Live video (CCTV / RTSP / file)
 
 | | Feature | Status |
 |---|---|---|
-| 🚗 | **6-signal accident detection** (speed_drop, collision, anomaly_stop, hit_and_run, jerk, smoke) | ✅ Implemented |
-| 💨 | **Smoke/dust cloud detection** — pure CV (no extra model): growing gray haze after hard impacts | ✅ Implemented |
-| 💥 | **Jerk / impact-shock detection** — catches single-vehicle crashes into walls, medians, trees | ✅ Implemented |
+| 🚗 | **4-signal accident detection** (speed_drop, collision, anomaly_stop, hit_and_run) | ✅ Implemented |
 | 🚦 | **Signal & traffic-jam suppression** — stopped queues at red lights don't alert (world-space + pixel-space) | ✅ Implemented |
 | 🧍 | **Hit-and-run detection** — vehicle–pedestrian intersection + pedestrian velocity crash + vehicle flees | ✅ Implemented |
 | 🎯 | **Per-kind verification** across consecutive frames + spatial dedup for tracker ID churn | ✅ Implemented |
@@ -119,7 +116,7 @@ Live video (CCTV / RTSP / file)
 
 ---
 
-## 🧩 Detection Criteria (the six signals)
+## 🧩 Detection Criteria (the four signals)
 
 All thresholds live in `vista_accident/vista_accident/config.py` (`HeuristicConfig`) and are tuned for ~1280×720, 15–30 fps CCTV feeds.
 
@@ -159,34 +156,13 @@ A vehicle parked/stopped on the carriageway, **not** at a known stop zone and **
 | Pedestrian velocity crash | > 90% drop |
 | Vehicle keeps moving after | ≥ 1.0 m/s |
 
-### 5. `jerk` — impact shock (single-vehicle crashes)
-A vehicle slamming into a fixed object (wall, median, tree, parked truck) produces a violent deceleration spike that windowed averages hide. Read from the Kalman-smoothed speed series.
-
-| Criterion | Threshold |
-|---|---|
-| Pre-impact speed | ≥ 2.0 m/s |
-| Peak deceleration in 0.3 s window | > 8 m/s² (normal braking is 2–4) |
-| Ended near-stopped | `now ≤ 1.0 m/s` |
-| Requires | ML speed estimator (calibrated m/s²) |
-
-### 6. `smoke` — dust/smoke cloud after a hard impact (pure CV)
-Mask grayish, low-texture, mid-bright pixels → connected components → a blob that **persists and grows** (>25% vs. first-seen area) becomes a `smoke` trigger. Fog and static bright regions don't expand, so they don't fire.
-
-| Criterion | Threshold |
-|---|---|
-| Blob area | 900 – 40,000 px² |
-| Saturation (HSV) | < 50 (gray, not colored) |
-| Value (HSV) | 110 – 245 |
-| Local texture (std-dev) | < 22 (haze is smooth) |
-| Growth vs. first-seen area | > 1.25× |
-
-**Fusion priority** (which signal names the incident): `hit_and_run > collision > smoke/jerk > speed_drop > anomaly_stop`. Smoke evidence carried onto a fused incident boosts its severity.
+**Fusion priority** (which signal names the incident): `hit_and_run > collision > speed_drop > anomaly_stop`.
 
 ---
 
 ## 🏥 Severity Scoring & Routing
 
-Each confirmed event is scored **dynamically** (0.0–1.0) from pre-impact speed, overlap depth, deceleration magnitude, smoke area/growth, pedestrian proximity, and post-impact behavior.
+Each confirmed event is scored **dynamically** (0.0–1.0) from pre-impact speed, overlap depth, deceleration magnitude, pedestrian proximity, and post-impact behavior.
 
 | Score | Severity | Routed to |
 |---|---|---|
@@ -195,7 +171,7 @@ Each confirmed event is scored **dynamically** (0.0–1.0) from pre-impact speed
 | 0.60 – 0.85 | `high` | 🚔 Traffic police + 🚑 Hospital/EMS |
 | 0.85 – 1.00 | `critical` | 🚔 Traffic police + 🚑 Hospital/EMS + 🚓 Police control room |
 
-A minor fender-bender only reaches traffic police; a high-speed crash with pedestrians nearby and a smoke cloud escalates to EMS and police control automatically.
+A minor fender-bender only reaches traffic police; a high-speed crash with pedestrians nearby escalates to EMS and police control automatically.
 
 ---
 
@@ -277,7 +253,7 @@ Paste the resulting `homography_src_points` / `homography_dst_points` into `Came
 
 ```bash
 python test_scenario.py    # synthetic head-on collision + pedestrian strike → asserts pipeline wiring
-python test_accuracy.py    # smoke, jerk, signal-queue suppression, partial speed_drop
+python test_accuracy.py    # wall-crash speed drop, junction-queue suppression, hard stop, collision
 ```
 
 ---
@@ -289,7 +265,7 @@ vista_accident/
 ├── demo.py                    # CLI runner (video/RTSP → annotated out + alert log)
 ├── gui_app.py                 # PyQt5 desktop application
 ├── test_scenario.py           # synthetic pipeline test (head-on collision)
-├── test_accuracy.py           # tests for the 6-signal accuracy fixes
+├── test_accuracy.py           # tests for the 4-signal accuracy fixes
 ├── requirements.txt
 ├── tools/calibrate_camera.py  # homography calibration for speed estimation
 └── vista_accident/
@@ -298,8 +274,7 @@ vista_accident/
     ├── tracker.py             # ByteTrack via supervision
     ├── track_history.py       # rolling per-track buffers + velocity/IoU/stationary helpers
     ├── speed_estimator.py     # homography world coords, LSQ velocity, Kalman filter
-    ├── heuristics.py          # the 6 signals (speed_drop, collision, anomaly_stop, hit_and_run, jerk)
-    ├── smoke_detector.py      # CV-only smoke/dust cloud detector
+    ├── heuristics.py          # the 4 signals (speed_drop, collision, anomaly_stop, hit_and_run)
     ├── verification.py        # per-kind confirm windows, cooldown, spatial dedup
     ├── fusion.py              # merges related events → one alert per crash
     ├── severity.py            # dynamic 0–1 scoring + channel routing
@@ -315,7 +290,7 @@ vista_accident/
 
 Everything is tunable in `config.py`:
 
-- **`HeuristicConfig`** — all six signal thresholds, verification windows, cooldowns, jam suppression, smoke parameters
+- **`HeuristicConfig`** — all four signal thresholds, verification windows, cooldowns, jam suppression
 - **`CameraConfig`** — camera id/location/GPS, stop zones, homography calibration, speed-estimator settings
 - **`DispatchConfig`** — mock webhook endpoints, dashboard log path
 
@@ -323,7 +298,7 @@ Everything is tunable in `config.py`:
 from vista_accident import AccidentPipeline, HeuristicConfig
 
 pipeline = AccidentPipeline(
-    heuristic_cfg=HeuristicConfig(smoke_min_area_px=1200, jerk_min_decel=10.0),
+    heuristic_cfg=HeuristicConfig(),
     camera_cfg=...,   # CameraConfig(camera_id="CAM-01", stop_zones=[...])
     dispatch_cfg=..., # DispatchConfig(dashboard_log_path="alerts.jsonl")
     fps_hint=25.0,
@@ -338,10 +313,10 @@ result = pipeline.process_frame(frame, t)   # per frame: tracks, events, alerts,
 | Test | What it verifies |
 |---|---|
 | `test_scenario.py` | Heuristics → verification → fusion → dispatch wiring; collision + speed_drop fuse into **one** alert |
-| `test_accuracy.py` | Growing dust cloud → `smoke` alert; wall crash → `jerk`; 3-car signal queue → **no** alert; 70% velocity drop → `speed_drop` |
-| 10 real clips (`Video/`) | Confirmed detections on collisions, wall impacts, smoke clouds; zero false alerts on signal queues / normal braking |
+| `test_accuracy.py` | Wall-crash → `speed_drop`; 3-car signal queue → **no** alert; hard-stop → `speed_drop`; head-on collision → `collision` dispatches |
+| 10 real clips (`Video/`) | Confirmed detections on collisions and hard stops; zero false alerts on signal queues / normal braking |
 
-**Accuracy pass (2026-08-02)** — smoke/jerk added, signal-queue suppression fixed (pixel-space fallback so it works uncalibrated), anomaly_stop prior-motion requirement, speed-drop retuned to Kalman instantaneous velocity (0.8 → 0.65 ratio).
+**Accuracy fixes (2026-08-02)** — signal-queue suppression (pixel-space fallback so it works uncalibrated), anomaly_stop prior-motion requirement, windowed velocity-drop tuning.
 
 ---
 
