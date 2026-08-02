@@ -39,17 +39,9 @@ class HeuristicConfig:
 
     # --- Signal 1: speed drop ---
     speed_drop_window_s: float = 0.5      # look-back window for velocity comparison
-    speed_drop_ratio: float = 0.65        # >65% velocity drop (was 0.8 — some
-                                          # hard stops only dropped ~70-80% and
-                                          # slipped through the old threshold)
+    speed_drop_ratio: float = 0.8         # >80% velocity drop within window
     # m/s equivalents of the tuned px/s thresholds (old: 40 px/s @ 0.05 m/px).
-    speed_drop_min_prior_speed: float = 1.2  # m/s — ignore tracks that were already ~stationary
-    # Absolute cap on the "after" speed: even a modest ratio with a tiny prior
-    # is a real stop if it ends near-zero. Only honored when the drop is still
-    # substantial (>speed_drop_abs_min_ratio) so normal creeping stops don't
-    # alert.
-    speed_drop_max_now_speed: float = 1.0    # m/s
-    speed_drop_abs_min_ratio: float = 0.5    # floor on drop_ratio for the abs-cap branch
+    speed_drop_min_prior_speed: float = 2.0  # m/s — ignore tracks that were already ~stationary
 
     # --- Signal 2: collision (two tracks overlap + impact signature) ---
     # "Impact signature" = at least one vehicle was moving meaningfully before
@@ -108,7 +100,11 @@ class HeuristicConfig:
     smoke_max_local_std: int = 22          # low texture (blurred haze), not a busy object
     smoke_growth_ratio: float = 1.25       # blob must grow >25% vs first-seen area
     smoke_persist_frames: int = 5          # blob must persist this many frames
-    smoke_detector_enabled: bool = True
+    # Off by default — restored to yesterday's tuning. Smoke/dust as its own
+    # alert kind was splitting one crash into extra cards and masking the real
+    # collision classification (A/B: clip_03 collision -> jerk+smoke, no
+    # collision). Can be re-enabled with --heuristics smoke_detector_enabled=true.
+    smoke_detector_enabled: bool = False
 
     # --- Signal 4: hit-and-run (vehicle-pedestrian intersection + ped velocity crash) ---
     hitrun_iou_threshold: float = 0.15

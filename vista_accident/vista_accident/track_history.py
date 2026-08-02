@@ -237,7 +237,7 @@ class TrackHistory:
         Pass include_stale=True for callers that intentionally want the
         wider buffer (none currently do, kept for future use/testing).
         """
-        ids = list(self._current_frame_ids) if not include_stale else list(self.tracks.keys())
+        ids = list(self.tracks.keys()) if not include_stale else list(self.tracks.keys())
         if cls_filter is None:
             return ids
         out = []

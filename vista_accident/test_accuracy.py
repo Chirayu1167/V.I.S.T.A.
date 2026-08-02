@@ -56,7 +56,8 @@ def run(pipeline, n_frames, frame_maker):
 def test_smoke():
     det = ScriptedDetector()
     p = AccidentPipeline(detector=det, tracker=Tracker(frame_rate=int(FPS)),
-                         heuristic_cfg=HeuristicConfig(smoke_min_area_px=300,
+                         heuristic_cfg=HeuristicConfig(smoke_detector_enabled=True,
+                                                       smoke_min_area_px=300,
                                                        smoke_max_area_px=40000),
                          camera_cfg=CameraConfig(camera_id="SMOKE"),
                          dispatch_cfg=DispatchConfig(dashboard_log_path="test_alerts.jsonl"),
@@ -78,15 +79,17 @@ def test_smoke():
     print("PASS: growing dust cloud -> smoke alert")
 
 
-def test_jerk_wall_crash():
+def test_wall_crash_speed_drop():
+    """Single-vehicle crash into a wall: with jerk removed (yesterday's
+    tuning), this is caught by speed_drop instead — the car goes from fast to
+    dead-stop in one frame, a >80% drop the windowed reading sees."""
     det = ScriptedDetector()
     p = AccidentPipeline(detector=det, tracker=Tracker(frame_rate=int(FPS)),
                          heuristic_cfg=HeuristicConfig(),
-                         camera_cfg=CameraConfig(camera_id="JERK"),
+                         camera_cfg=CameraConfig(camera_id="WALL"),
                          dispatch_cfg=DispatchConfig(dashboard_log_path="test_alerts.jsonl"),
-                         fps_hint=FPS, use_ml_speed=True)
+                         fps_hint=FPS, use_ml_speed=False)
     # Single car drives fast then hits a wall at frame 30: speed 20px/frame -> 0.
-    # (use_ml_speed=True so jerk gets calibrated m/s² deceleration.)
     script = []
     x = 50.0
     for i in range(60):
@@ -97,9 +100,9 @@ def test_jerk_wall_crash():
     det.script = script
     evs = run(p, 60, make_frame)
     kinds = sorted(set(k for _, k, _ in evs))
-    print(f"[jerk] events={len(evs)} kinds={kinds}")
-    assert "jerk" in kinds, "FAIL: jerk not detected on wall crash"
-    print("PASS: single-vehicle wall crash -> jerk alert")
+    print(f"[wall] events={len(evs)} kinds={kinds}")
+    assert "speed_drop" in kinds, "FAIL: wall crash not caught by speed_drop"
+    print("PASS: single-vehicle wall crash -> speed_drop alert")
 
 
 def test_signal_stop_suppressed():
@@ -129,23 +132,24 @@ def test_signal_stop_suppressed():
     kinds = sorted(set(k for _, k, _ in evs))
     print(f"[signal] events={len(evs)} kinds={kinds}")
     assert "anomaly_stop" not in kinds, "FAIL: signal-stop queue alerted"
-    assert "jerk" not in kinds, "FAIL: gradual braking flagged as jerk"
     print("PASS: 3-car queue braking at signal -> no alert")
 
 
-def test_partial_speed_drop():
+def test_hard_stop_speed_drop():
+    """Yesterday's tuning restored: speed_drop needs >80% drop with a real
+    prior speed (ratio 0.8 / min_prior 2.0). A near-total stop must fire;
+    a partial 70% slow-down must NOT (that was today's looser 0.65 abs-cap
+    behavior, reverted so normal braking doesn't alert)."""
     det = ScriptedDetector()
     p = AccidentPipeline(detector=det, tracker=Tracker(frame_rate=int(FPS)),
                          heuristic_cfg=HeuristicConfig(),
-                         camera_cfg=CameraConfig(camera_id="DROPM"),
+                         camera_cfg=CameraConfig(camera_id="DROP"),
                          dispatch_cfg=DispatchConfig(dashboard_log_path="test_alerts.jsonl"),
                          fps_hint=FPS, use_ml_speed=False)
-    # Car slows from 20px/frame to 6px/frame at frame 30: 70% drop (old 0.8
-    # threshold missed this; new 0.65 + abs-cap catches it).
     script = []
     x = 50.0
     for i in range(70):
-        v = 20 if i < 30 else 6
+        v = 20 if i < 30 else 1   # 20px/frame -> 1px/frame = 95% drop
         x += v
         box = (x, 400, x + 120, 480)
         script.append([(box, 0.9, 2)])
@@ -153,8 +157,29 @@ def test_partial_speed_drop():
     evs = run(p, 70, make_frame)
     kinds = sorted(set(k for _, k, _ in evs))
     print(f"[drop] events={len(evs)} kinds={kinds}")
-    assert "speed_drop" in kinds, "FAIL: 70% drop not detected"
-    print("PASS: 70% velocity drop -> speed_drop alert")
+    assert "speed_drop" in kinds, "FAIL: near-stop crash not detected"
+    print("PASS: 95% velocity drop -> speed_drop alert")
+
+    # And a partial 70% slow (normal braking at a light) must NOT alert.
+    det = ScriptedDetector()
+    p2 = AccidentPipeline(detector=det, tracker=Tracker(frame_rate=int(FPS)),
+                          heuristic_cfg=HeuristicConfig(),
+                          camera_cfg=CameraConfig(camera_id="DROPP"),
+                          dispatch_cfg=DispatchConfig(dashboard_log_path="test_alerts.jsonl"),
+                          fps_hint=FPS, use_ml_speed=False)
+    script = []
+    x = 50.0
+    for i in range(70):
+        v = 20 if i < 30 else 6   # 20 -> 6 = 70% drop, under the 0.8 bar
+        x += v
+        box = (x, 400, x + 120, 480)
+        script.append([(box, 0.9, 2)])
+    det.script = script
+    evs = run(p2, 70, make_frame)
+    kinds = sorted(set(k for _, k, _ in evs))
+    print(f"[drop70] events={len(evs)} kinds={kinds}")
+    assert "speed_drop" not in kinds, "FAIL: 70% braking alerted (should need >80%)"
+    print("PASS: 70% braking at light -> no speed_drop alert")
 
 
 def test_delayed_kind_fused():
@@ -163,7 +188,8 @@ def test_delayed_kind_fused():
     dispatched alert — not two cards with different kinds."""
     det = ScriptedDetector()
     p = AccidentPipeline(detector=det, tracker=Tracker(frame_rate=int(FPS)),
-                         heuristic_cfg=HeuristicConfig(smoke_min_area_px=900,
+                         heuristic_cfg=HeuristicConfig(smoke_detector_enabled=True,
+                                                       smoke_min_area_px=900,
                                                        smoke_max_area_px=40000),
                          camera_cfg=CameraConfig(camera_id="FUSE"),
                          dispatch_cfg=DispatchConfig(dashboard_log_path="test_alerts.jsonl"),
@@ -210,8 +236,8 @@ def test_delayed_kind_fused():
 
 if __name__ == "__main__":
     test_smoke()
-    test_jerk_wall_crash()
+    test_wall_crash_speed_drop()
     test_signal_stop_suppressed()
-    test_partial_speed_drop()
+    test_hard_stop_speed_drop()
     test_delayed_kind_fused()
     print("\nALL NEW-FEATURE TESTS PASSED")

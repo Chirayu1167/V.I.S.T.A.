@@ -46,13 +46,10 @@ def check_speed_drop(history: TrackHistory, t: float, cfg: HeuristicConfig,
     for tid in history.active_ids(cls_filter=VEHICLE_CLASSES):
         if tid in jammed:
             continue  # part of a stationary queue — normal braking
-        # Prior speed is a windowed average (previous window vs. current
-        # window) so a single jittery tracker frame cannot fake a "drop".
-        # The AFTER reading uses the Kalman-smoothed instantaneous velocity
-        # instead of a windowed average: a window spanning the drop moment
-        # mixes pre-drop and post-drop samples and masks the drop itself,
-        # which is why some hard stops slipped through before.
-        now_v = history.instantaneous_velocity(tid)
+        # Both readings are windowed averages (previous window vs. current
+        # window) instead of raw instantaneous velocity, so a single jittery
+        # tracker frame cannot fake a "drop".
+        now_v = history.velocity_between(tid, t - cfg.speed_drop_window_s, t)
         prior_v = history.velocity_between(
             tid, t - 2 * cfg.speed_drop_window_s, t - cfg.speed_drop_window_s)
         if prior_v is None or now_v is None:
@@ -63,14 +60,7 @@ def check_speed_drop(history: TrackHistory, t: float, cfg: HeuristicConfig,
         if p and _in_any_zone((p.cx, p.cy), stop_zones):
             continue  # legitimate braking at an intersection/bus stop — suppress
         drop_ratio = (prior_v - now_v) / prior_v
-        # Either the vehicle lost most of its speed, or it ended up (nearly)
-        # stopped outright — the absolute-cap branch catches big stops whose
-        # ratio misses the bar by a little (but still requires a real drop,
-        # so a car crawling to a halt doesn't alert).
-        if drop_ratio > cfg.speed_drop_ratio or (
-            now_v <= cfg.speed_drop_max_now_speed
-            and drop_ratio > cfg.speed_drop_abs_min_ratio
-        ):
+        if drop_ratio > cfg.speed_drop_ratio:
             # Include ML speed details if available
             ml_speed = history.get_ml_speed(tid)
             meta = {"prior_v": prior_v, "now_v": now_v, "drop_ratio": drop_ratio,
@@ -138,42 +128,6 @@ def check_collision(history: TrackHistory, t: float, cfg: HeuristicConfig) -> Li
                 kind="collision", track_ids=(id_a, id_b), t=t,
                 meta=meta,
             ))
-    return triggers
-
-
-def check_jerk(history: TrackHistory, t: float, cfg: HeuristicConfig) -> List[RawTrigger]:
-    """Impact shock: a vehicle slamming into a fixed object (wall, median,
-    tree, parked truck) decelerates violently in a fraction of a second.
-    Speed_drop can't see it (its windowed average hides the spike) and
-    collision needs a second moving track — this catches single-vehicle
-    crashes from the Kalman-smoothed speed series. Requires the ML speed
-    estimator: deceleration thresholds are real m/s², which only calibrated
-    world coordinates provide."""
-    triggers = []
-    if history.speed_estimator is None:
-        return triggers  # no calibrated world speeds — can't trust px/s² numbers
-    for tid in history.active_ids(cls_filter=VEHICLE_CLASSES):
-        prior_v = history.velocity_between(
-            tid, t - 1.2, t - 0.2)
-        if prior_v is None or prior_v < cfg.jerk_min_prior_speed:
-            continue  # was already slow/stationary — braking, not impact
-        decel = history.deceleration(tid, cfg.jerk_window_s)
-        if decel is None or decel < cfg.jerk_min_decel:
-            continue  # normal braking (~2-4 m/s²) or coasting
-        now_v = history.instantaneous_velocity(tid)
-        if now_v is not None and now_v > cfg.speed_drop_max_now_speed:
-            continue  # still moving fast — this was a swerve, not an impact
-        p = history.latest(tid)
-        ml_speed = history.get_ml_speed(tid)
-        meta = {"prior_v": prior_v, "now_v": now_v, "decel": decel,
-                "cx": p.cx, "cy": p.cy}
-        if ml_speed:
-            meta["ml_speed_mps"] = ml_speed.speed_mps
-            meta["ml_speed_kmph"] = ml_speed.speed_kmph
-            meta["ml_world_pos"] = ml_speed.world_pos
-        triggers.append(RawTrigger(
-            kind="jerk", track_ids=(tid,), t=t, meta=meta,
-        ))
     return triggers
 
 
@@ -323,7 +277,6 @@ def run_all_heuristics(history: TrackHistory, t: float, cfg: HeuristicConfig, st
     triggers = []
     triggers += check_speed_drop(history, t, cfg, stop_zones=stop_zones)
     triggers += check_collision(history, t, cfg)
-    triggers += check_jerk(history, t, cfg)
     triggers += check_anomaly_stop(history, t, cfg, stop_zones=stop_zones)
     triggers += check_hit_and_run(history, t, cfg)
     return triggers

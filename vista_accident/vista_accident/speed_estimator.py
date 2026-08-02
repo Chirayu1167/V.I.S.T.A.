@@ -388,12 +388,9 @@ class MlSpeedEstimator:
         return fit[0] if fit else None
 
     def instantaneous_velocity(self, track_id: int) -> Optional[float]:
-        """Kalman-filtered instantaneous speed (m/s). Falls back to a fresh
-        least-squares fit over the most recent samples only if the filter
-        hasn't seen this track yet."""
-        kf = self._kalman_velocity(track_id)
-        if kf is not None:
-            return kf
+        """Instantaneous speed (m/s) from a least-squares fit over the most
+        recent samples (windowed regression, not Kalman-smoothed) so the
+        pre/post-impact speed collapse is not masked by smoothing."""
         hist = self.track_histories.get(track_id)
         if not hist or len(hist) < 2:
             speed = self.track_speeds.get(track_id)
