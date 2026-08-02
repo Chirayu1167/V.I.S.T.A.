@@ -54,7 +54,18 @@ def main():
     ap.add_argument("--stop-zones-json", default=None,
                      help="Optional JSON file with a list of stop-zone polygons "
                           "(each: [[x,y],...]) where vehicles legitimately stop "
-                          "(intersections, bus stops) — suppresses speed_drop/anomaly_stop there.")
+                          "(intersections, bus stops) — suppresses speed_drop/anomaly_stop there. "
+                          "Draw one with: python -m vista_accident.tools.draw_stop_zones")
+    ap.add_argument("--clip-dir", default=None,
+                     help="If set, saves a short .mp4 clip (pre/post impact) per dispatched "
+                          "alert into this directory instead of just a single impact frame.")
+    ap.add_argument("--enable-plate-ocr", action="store_true",
+                     help="Run license-plate OCR (requires `pip install easyocr`) on "
+                          "hit_and_run alerts and include plate_text in the payload.")
+    ap.add_argument("--watch-config", default=None,
+                     help="Optional JSON file (see vista_accident.config.ConfigWatcher) to "
+                          "hot-reload heuristic thresholds / stop_zones from during the run, "
+                          "without restarting — useful for live threshold tuning.")
     args = ap.parse_args()
 
     cap = cv2.VideoCapture(args.source)
@@ -67,20 +78,34 @@ def main():
 
     from vista_accident.detector import Detector
     from vista_accident.confirmation import SecondaryConfirmation
+    from vista_accident.plate_reader import PlateReader
+    from vista_accident.config import ConfigWatcher
 
     stop_zones = []
     if args.stop_zones_json:
         with open(args.stop_zones_json) as f:
             stop_zones = json.load(f)
 
+    heuristic_cfg = HeuristicConfig()
+    camera_cfg = CameraConfig(camera_id=args.camera_id, location_name=args.location,
+                               stop_zones=stop_zones)
+
+    watcher = None
+    if args.watch_config:
+        watcher = ConfigWatcher(args.watch_config, heuristic_cfg=heuristic_cfg, camera_cfg=camera_cfg)
+        watcher.start()
+        print(f"Hot-reloading thresholds/stop_zones from {args.watch_config} every "
+              f"{watcher.interval_s:.0f}s.")
+
     pipeline = AccidentPipeline(
         detector=Detector(device=args.device),
-        heuristic_cfg=HeuristicConfig(),
-        camera_cfg=CameraConfig(camera_id=args.camera_id, location_name=args.location,
-                                stop_zones=stop_zones),
+        heuristic_cfg=heuristic_cfg,
+        camera_cfg=camera_cfg,
         dispatch_cfg=DispatchConfig(dashboard_log_path="alerts.jsonl"),
         secondary=SecondaryConfirmation(weights_path=args.secondary_weights, device=args.device),
         fps_hint=fps,
+        clip_dir=args.clip_dir,
+        plate_reader=PlateReader() if args.enable_plate_ocr else None,
     )
 
     writer = cv2.VideoWriter(args.output, cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
@@ -123,6 +148,9 @@ def main():
 
     cap.release()
     writer.release()
+    if watcher:
+        watcher.stop()
+    pipeline.close()  # flush any alerts still queued for the async log writer
 
     elapsed = time.time() - t0
     n_alerts = len(pipeline.confirmed_log)

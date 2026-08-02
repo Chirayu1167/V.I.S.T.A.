@@ -9,9 +9,11 @@ demo.py for a minimal single-branch runner, and README.md for the
 concurrency wiring pattern.
 """
 
+import os
 from collections import deque
 from typing import Optional
 
+import cv2
 import numpy as np
 
 from .alert import AlertDispatcher
@@ -20,8 +22,8 @@ from .confirmation import SecondaryConfirmation
 from .detector import Detector
 from .fusion import IncidentFuser
 from .heuristics import run_all_heuristics
+from .plate_reader import PlateReader
 from .severity import SeverityAssessor, SeverityConfig
-from .smoke_detector import SmokeDetector
 from .speed_estimator import MlSpeedEstimator, create_speed_estimator_from_config
 from .track_history import TrackHistory
 from .tracker import Tracker
@@ -39,7 +41,11 @@ class AccidentPipeline:
                  severity_cfg: Optional[SeverityConfig] = None,
                  clip_buffer_seconds: float = 4.0,
                  fps_hint: float = 25.0,
-                 use_ml_speed: bool = True):
+                 use_ml_speed: bool = True,
+                 clip_dir: Optional[str] = None,
+                 clip_pre_seconds: float = 2.0,
+                 clip_post_seconds: float = 1.5,
+                 plate_reader: Optional[PlateReader] = None):
         self.cfg = heuristic_cfg or HeuristicConfig()
         self.camera_cfg = camera_cfg or CameraConfig()
         self.dispatch_cfg = dispatch_cfg or DispatchConfig()
@@ -56,20 +62,36 @@ class AccidentPipeline:
         self.history = TrackHistory(
             history_seconds=self.cfg.history_seconds, 
             assumed_fps=fps_hint,
-            speed_estimator=self.speed_estimator
+            speed_estimator=self.speed_estimator,
+            meter_per_pixel=getattr(self.camera_cfg, "meter_per_pixel", 0.05),
         )
         self.verifier = Verifier(self.cfg)
         self.fuser = IncidentFuser()
         self.severity = SeverityAssessor(severity_cfg)
         self.secondary = secondary or SecondaryConfirmation(weights_path=None)
         self.dispatcher = AlertDispatcher(self.camera_cfg, self.dispatch_cfg)
-        self.smoke_detector = SmokeDetector(self.cfg)
+        self.plate_reader = plate_reader  # optional; only used on hit_and_run events
 
         # Rolling clip buffer for alert packaging ("clip, location, timestamp").
-        self._clip_buffer = deque(maxlen=int(clip_buffer_seconds * fps_hint))
+        # Sized to cover pre- AND post-impact frames for real clip export
+        # (see clip_dir), not just the impact-frame lookup below.
+        self.clip_dir = clip_dir
+        self.clip_pre_seconds = clip_pre_seconds
+        self.clip_post_seconds = clip_post_seconds
+        effective_buffer_s = max(clip_buffer_seconds, clip_pre_seconds + clip_post_seconds + 1.0)
+        self._clip_buffer = deque(maxlen=int(effective_buffer_s * fps_hint))
+        self._pending_clips = []  # [{"alert_id":, "t_impact":, "due_t":}]
+        if self.clip_dir:
+            os.makedirs(self.clip_dir, exist_ok=True)
 
         self.frame_count = 0
         self.confirmed_log = []  # in-memory record for the demo/CLI summary
+
+    def close(self):
+        """Flush and stop the alert dispatcher's background log thread.
+        Call this once after the frame loop ends (see demo.py/gui_app.py) —
+        without it, alerts still queued when the process exits can be lost."""
+        self.dispatcher.close()
 
     def _pick_impact_frame(self, event) -> Optional[np.ndarray]:
         """The stored raw frame nearest to the moment the impact actually
@@ -99,7 +121,6 @@ class AccidentPipeline:
 
         raw_triggers = run_all_heuristics(self.history, t, self.cfg,
                                            stop_zones=self.camera_cfg.stop_zones)
-        raw_triggers += self.smoke_detector.process(frame, t)
         confirmed_events = self.fuser.process(
             t, self.verifier.process(t, raw_triggers))
 
@@ -119,10 +140,45 @@ class AccidentPipeline:
                 continue
 
             severity = self.severity.assess(event, self.history)
-            clip_path = None  # wire up e.g. self._save_clip(event) for real clip export
+
+            # Plate OCR only for hit_and_run — the one event kind where "the
+            # vehicle kept moving" makes identifying it the actual point.
+            if self.plate_reader is not None and self.plate_reader.enabled and event.kind == "hit_and_run":
+                vehicle_bbox = event.meta.get("vehicle_bbox")
+                if vehicle_bbox is None:
+                    # heuristics.py doesn't currently store the raw bbox in
+                    # meta — fall back to the current tracked box for the
+                    # vehicle track id if still visible this frame.
+                    vehicle_tid = event.track_ids[0]
+                    vt = next((tr for tr in tracks if tr[0] == vehicle_tid), None)
+                    vehicle_bbox = vt[1] if vt else None
+                if vehicle_bbox is not None:
+                    crop = PlateReader.crop_bbox(impact_frame, vehicle_bbox)
+                    plate_result = self.plate_reader.read(crop)
+                    if plate_result.get("plate_text"):
+                        event.meta["plate_text"] = plate_result["plate_text"]
+                        event.meta["plate_confidence"] = plate_result["confidence"]
+
+            clip_path = None
+            if self.clip_dir:
+                # Reserve the path now (dispatch isn't delayed for it); the
+                # actual file is written a few frames later once the buffer
+                # has enough post-impact frames — see _process_pending_clips.
+                clip_path = os.path.join(self.clip_dir, f"pending-{self.camera_cfg.camera_id}-{int(event.t)}-{self.frame_count}.mp4")
+
             payload = self.dispatcher.build_and_dispatch(event, secondary_result, clip_path, severity=severity)
             alerts.append(payload)
             self.confirmed_log.append((event, secondary_result, "dispatched"))
+
+            if self.clip_dir:
+                self._pending_clips.append({
+                    "alert_id": payload.alert_id,
+                    "path": clip_path,
+                    "t_impact": event.t,
+                    "due_t": event.t + self.clip_post_seconds,
+                })
+
+        saved_clips = self._process_pending_clips(t)
 
         # Include ML speed estimates in output
         speeds = {}
@@ -133,5 +189,31 @@ class AccidentPipeline:
             "tracks": tracks, 
             "confirmed_events": confirmed_events, 
             "alerts": alerts,
-            "speeds": speeds
+            "speeds": speeds,
+            "clips_saved": saved_clips,
         }
+
+    def _process_pending_clips(self, t: float) -> list:
+        """Writes out any pending clip whose post-impact window has now
+        fully landed in the buffer. Returns [(alert_id, path), ...] for
+        clips written this call."""
+        if not self._pending_clips:
+            return []
+        ready, still_pending = [], []
+        for p in self._pending_clips:
+            (ready if t >= p["due_t"] else still_pending).append(p)
+        self._pending_clips = still_pending
+
+        saved = []
+        for p in ready:
+            frames = [f for (bt, f) in self._clip_buffer
+                      if p["t_impact"] - self.clip_pre_seconds <= bt <= p["t_impact"] + self.clip_post_seconds]
+            if not frames:
+                continue
+            h, w = frames[0].shape[:2]
+            writer = cv2.VideoWriter(p["path"], cv2.VideoWriter_fourcc(*"mp4v"), self.fps_hint, (w, h))
+            for f in frames:
+                writer.write(f)
+            writer.release()
+            saved.append((p["alert_id"], p["path"]))
+        return saved

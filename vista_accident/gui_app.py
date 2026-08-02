@@ -230,6 +230,7 @@ class VideoWorker(QThread):
                     self.msleep(int(remaining * 1000))
 
             cap.release()
+            pipeline.close()  # flush any alerts still queued for the async log writer
 
             n_alerts = len(pipeline.confirmed_log)
             n_dispatched = sum(1 for _, _, status in pipeline.confirmed_log if status == "dispatched")
@@ -238,6 +239,10 @@ class VideoWorker(QThread):
             })
         except Exception as e:  # surface errors in the UI instead of a silent thread death
             self.error.emit(str(e))
+            try:
+                pipeline.close()
+            except NameError:
+                pass  # pipeline wasn't constructed yet (e.g. video failed to open)
 
 
 class Thumb(QLabel):

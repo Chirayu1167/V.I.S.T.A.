@@ -35,14 +35,16 @@ class SeverityConfig:
     kind_baseline: Dict[str, float] = field(default_factory=lambda: {
         "hit_and_run": 0.65,
         "collision": 0.55,
-        "jerk": 0.45,
-        "smoke": 0.40,
         "speed_drop": 0.30,
         "anomaly_stop": 0.15,
     })
 
 
 SEVERITY_LABELS = ["low", "medium", "high", "critical"]
+
+# TrackHistory/heuristics.py velocities are m/s; SeverityConfig thresholds
+# below are km/h-scale (matches the docstring's "high_speed_threshold=120").
+MPS_TO_KMH = 3.6
 
 CHANNELS_BY_SEVERITY = {
     "low": ("traffic_police",),
@@ -70,8 +72,6 @@ class SeverityAssessor:
         fn = {
             "collision": self._score_collision,
             "hit_and_run": self._score_hit_and_run,
-            "jerk": self._score_jerk,
-            "smoke": self._score_smoke,
             "speed_drop": self._score_speed_drop,
             "anomaly_stop": self._score_anomaly_stop,
         }.get(event.kind)
@@ -84,14 +84,20 @@ class SeverityAssessor:
     # ------------------------------------------------------------------
 
     def _score_collision(self, event: ConfirmedEvent, history: TrackHistory) -> float:
+        # NOTE: all velocities coming out of TrackHistory/heuristics.py are
+        # m/s. SeverityConfig's thresholds (high_speed_threshold=120,
+        # "stopped" cutoffs, etc.) are km/h-scale, so every m/s value read
+        # here is converted with MPS_TO_KMH before comparison. Mixing the
+        # two used to silently push almost every event toward "stopped" /
+        # "low speed" regardless of actual severity.
         meta = event.meta
         iou = meta.get("iou", 0.0)
-        v_a = meta.get("v_a", 0.0)
-        v_b = meta.get("v_b", 0.0)
+        v_a = meta.get("v_a", 0.0) * MPS_TO_KMH
+        v_b = meta.get("v_b", 0.0) * MPS_TO_KMH
 
         tid_a, tid_b = event.track_ids[:2]
-        prior_a = history.velocity(tid_a, self.cfg.speed_drop_window_s) or 0.0
-        prior_b = history.velocity(tid_b, self.cfg.speed_drop_window_s) or 0.0
+        prior_a = (history.velocity(tid_a, self.cfg.speed_drop_window_s) or 0.0) * MPS_TO_KMH
+        prior_b = (history.velocity(tid_b, self.cfg.speed_drop_window_s) or 0.0) * MPS_TO_KMH
         max_prior = max(prior_a, prior_b)
 
         speed_score = np.clip(max_prior / self.cfg.high_speed_threshold, 0.0, 1.0)
@@ -102,18 +108,17 @@ class SeverityAssessor:
         both_stopped = 1.0 if (v_a < 10.0 and v_b < 10.0) else 0.0
         persons = self._persons_near(event, history)
         person_factor = min(persons / 3.0, 1.0) * 0.15
-        smoke_factor = 0.10 if (event.meta.get("has_smoke") or event.meta.get("smoke_area")) else 0.0
 
         return np.clip(
             0.30 * speed_score + 0.25 * impact_score + 0.15 * both_stopped
-            + 0.15 * person_factor + 0.15 + smoke_factor,
+            + 0.15 * person_factor + 0.15,
             0.0, 1.0,
         )
 
     def _score_hit_and_run(self, event: ConfirmedEvent, history: TrackHistory) -> float:
         meta = event.meta
         ped_drop = meta.get("ped_drop", 0.0)
-        vehicle_v = meta.get("vehicle_v", 0.0)
+        vehicle_v = meta.get("vehicle_v", 0.0) * MPS_TO_KMH
 
         drop_score = np.clip((ped_drop - 0.5) / 0.5, 0.0, 1.0)
         flee_score = np.clip(vehicle_v / 80.0, 0.0, 1.0)
@@ -125,43 +130,9 @@ class SeverityAssessor:
             0.0, 1.0,
         )
 
-    def _score_jerk(self, event: ConfirmedEvent, history: TrackHistory) -> float:
-        meta = event.meta
-        decel = meta.get("decel", 0.0)
-        prior_v = meta.get("prior_v", 0.0)
-
-        # Hard impact = very high deceleration + the vehicle ended near-stopped.
-        decel_score = np.clip((decel - 5.0) / 15.0, 0.0, 1.0)  # 5→20 m/s²
-        speed_score = np.clip(prior_v / self.cfg.high_speed_threshold, 0.0, 1.0)
-        persons = self._persons_near(event, history)
-        person_factor = min(persons / 3.0, 1.0) * 0.10
-        smoke_factor = 0.10 if (meta.get("has_smoke") or meta.get("smoke_area")) else 0.0
-
-        return np.clip(
-            0.40 * decel_score + 0.30 * speed_score + 0.10 * person_factor
-            + 0.10 + smoke_factor,
-            0.0, 1.0,
-        )
-
-    def _score_smoke(self, event: ConfirmedEvent, history: TrackHistory) -> float:
-        meta = event.meta
-        area = meta.get("area", 0.0)
-
-        # Bigger cloud = more violent crash (more debris/dust thrown up).
-        area_score = np.clip(area / 20000.0, 0.0, 1.0)
-        growth = meta.get("growth", 1.0)
-        growth_score = np.clip((growth - 1.0) / 2.0, 0.0, 1.0)
-        persons = self._persons_near(event, history)
-        person_factor = min(persons / 3.0, 1.0) * 0.10
-
-        return np.clip(
-            0.35 * area_score + 0.25 * growth_score + 0.10 * person_factor + 0.20,
-            0.0, 1.0,
-        )
-
     def _score_speed_drop(self, event: ConfirmedEvent, history: TrackHistory) -> float:
         meta = event.meta
-        prior_v = meta.get("prior_v", 0.0)
+        prior_v = meta.get("prior_v", 0.0) * MPS_TO_KMH
         drop_ratio = meta.get("drop_ratio", 0.0)
 
         speed_score = np.clip(prior_v / self.cfg.high_speed_threshold, 0.0, 1.0)

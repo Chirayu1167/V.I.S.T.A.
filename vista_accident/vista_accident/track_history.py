@@ -48,14 +48,25 @@ class TrackHistory:
         history_seconds: float = 3.0,
         assumed_fps: float = 25.0,
         speed_estimator: Optional[MlSpeedEstimator] = None,
+        meter_per_pixel: Optional[float] = None,
     ):
         self.history_seconds = history_seconds
         self.assumed_fps = assumed_fps
         self.speed_estimator = speed_estimator
+        # Only used by the PIXEL-BASED fallback path (speed_estimator is
+        # None). Without this, fallback velocity() calls returned raw px/s,
+        # which is off by 1/meter_per_pixel from the m/s units every
+        # HeuristicConfig threshold is tuned in. Defaults to CameraConfig's
+        # flat scale if not given explicitly.
+        self.meter_per_pixel = meter_per_pixel if meter_per_pixel is not None else 0.05
         # Generous buffer length; actual retention is time-based via prune().
         self._maxlen = max(30, int(history_seconds * assumed_fps * 2))
         self.tracks: Dict[int, deque] = {}
         self.last_seen: Dict[int, float] = {}
+        # Ids seen on the MOST RECENT update() call — what active_ids() uses
+        # by default, so heuristics don't evaluate stale/occluded tracks
+        # against several-frames-old bounding boxes.
+        self._current_frame_ids: set = set()
 
     def update(
         self,
@@ -79,6 +90,8 @@ class TrackHistory:
             buf.append(TrackPoint(t, cx, cy, bbox, cls))
             self.last_seen[track_id] = t
             seen_ids.add(track_id)
+
+        self._current_frame_ids = seen_ids
 
         if self.speed_estimator is not None:
             self.speed_estimator.update(t, detections)
@@ -125,9 +138,9 @@ class TrackHistory:
         past = self.point_near(track_id, latest.t - window_s)
         if past is None or past.t == latest.t:
             return None
-        dist = ((latest.cx - past.cx) ** 2 + (latest.cy - past.cy) ** 2) ** 0.5
+        dist_px = ((latest.cx - past.cx) ** 2 + (latest.cy - past.cy) ** 2) ** 0.5
         dt = latest.t - past.t
-        return dist / dt if dt > 0 else None
+        return (dist_px * self.meter_per_pixel) / dt if dt > 0 else None
 
     def velocity_between(self, track_id: int, t0: float, t1: float) -> Optional[float]:
         """Average speed (m/s) between two (backward-looking) timestamps.
@@ -139,9 +152,9 @@ class TrackHistory:
         p1 = self.point_near(track_id, t0)
         if not p1 or not p2 or p1.t == p2.t:
             return None
-        dist = ((p2.cx - p1.cx) ** 2 + (p2.cy - p1.cy) ** 2) ** 0.5
+        dist_px = ((p2.cx - p1.cx) ** 2 + (p2.cy - p1.cy) ** 2) ** 0.5
         dt = p2.t - p1.t
-        return dist / dt if dt > 0 else None
+        return (dist_px * self.meter_per_pixel) / dt if dt > 0 else None
 
     def instantaneous_velocity(self, track_id: int) -> Optional[float]:
         """Instantaneous velocity (m/s). Uses ML estimator if available."""
@@ -155,8 +168,8 @@ class TrackHistory:
         dt = p2.t - p1.t
         if dt <= 0:
             return None
-        dist = ((p2.cx - p1.cx) ** 2 + (p2.cy - p1.cy) ** 2) ** 0.5
-        return dist / dt
+        dist_px = ((p2.cx - p1.cx) ** 2 + (p2.cy - p1.cy) ** 2) ** 0.5
+        return (dist_px * self.meter_per_pixel) / dt
 
     def stationary_duration(self, track_id: int, max_velocity: float) -> float:
         """How long (seconds) the track has stayed below max_velocity (m/s), ending now."""
@@ -174,46 +187,27 @@ class TrackHistory:
             dt = p2.t - p1.t
             if dt <= 0:
                 continue
-            dist = ((p2.cx - p1.cx) ** 2 + (p2.cy - p1.cy) ** 2) ** 0.5
-            v = dist / dt
+            dist_px = ((p2.cx - p1.cx) ** 2 + (p2.cy - p1.cy) ** 2) ** 0.5
+            v = (dist_px * self.meter_per_pixel) / dt
             if v <= max_velocity:
                 start_t = p1.t
             else:
                 break
         return end_t - start_t
 
-    def deceleration(self, track_id: int, window_s: float) -> Optional[float]:
-        """Peak positive deceleration (px/s²) over the last `window_s` seconds.
-        Delegates to the ML estimator (m/s²) when available; otherwise reads the
-        raw pixel series directly."""
-        if self.speed_estimator is not None:
-            return self.speed_estimator.deceleration(track_id, window_s)
+    def active_ids(self, cls_filter=None, include_stale: bool = False) -> List[int]:
+        """Track ids to run heuristics against.
 
-        buf = self.tracks.get(track_id)
-        if not buf or len(buf) < 3:
-            return None
-        pts = list(buf)
-        cutoff = pts[-1].t - window_s
-        seg = [p for p in pts if p.t >= cutoff]
-        vs = []
-        for i in range(1, len(seg)):
-            dt = seg[i].t - seg[i - 1].t
-            if dt <= 0:
-                continue
-            dist = ((seg[i].cx - seg[i - 1].cx) ** 2 + (seg[i].cy - seg[i - 1].cy) ** 2) ** 0.5
-            vs.append((seg[i].t, dist / dt))
-        if len(vs) < 2:
-            return None
-        decels = []
-        for i in range(1, len(vs)):
-            dt = vs[i][0] - vs[i - 1][0]
-            if dt <= 0:
-                continue
-            decels.append((vs[i - 1][1] - vs[i][1]) / dt)
-        return max(0.0, max(decels)) if decels else None
-
-    def active_ids(self, cls_filter=None) -> List[int]:
-        ids = list(self.tracks.keys())
+        By default this is restricted to ids detected on the MOST RECENT
+        update() call — not everything still sitting in the rolling buffer.
+        A track that briefly drops out of detection (occlusion, a missed
+        frame) stays in `self.tracks` until it's pruned after
+        `history_seconds * 2`, but its latest bbox is stale and shouldn't be
+        used for spatial checks like collision IoU or hit-and-run overlap.
+        Pass include_stale=True for callers that intentionally want the
+        wider buffer (none currently do, kept for future use/testing).
+        """
+        ids = list(self._current_frame_ids) if not include_stale else list(self.tracks.keys())
         if cls_filter is None:
             return ids
         out = []

@@ -16,15 +16,16 @@ from typing import List
 
 from .verification import ConfirmedEvent
 
-EVENT_PRIORITY = {"hit_and_run": 5, "collision": 4, "smoke": 3, "jerk": 3, "speed_drop": 2, "anomaly_stop": 1}
+EVENT_PRIORITY = {"hit_and_run": 4, "collision": 3, "speed_drop": 2, "anomaly_stop": 1}
 
 
 class _Incident:
-    __slots__ = ("kind", "t", "cx", "cy", "track_ids", "meta", "consecutive_frames")
+    __slots__ = ("kind", "t", "first_t", "cx", "cy", "track_ids", "meta", "consecutive_frames")
 
     def __init__(self, kind, t, cx, cy, track_ids, meta, consecutive_frames):
         self.kind = kind
-        self.t = t
+        self.t = t              # timestamp of the REPRESENTATIVE (most severe) event
+        self.first_t = t        # for reporting only, never used for window/expiry math
         self.cx = cx
         self.cy = cy
         self.track_ids = track_ids
@@ -55,27 +56,20 @@ class IncidentFuser:
                 ))
             else:
                 inc.track_ids = tuple(sorted(set(inc.track_ids) | set(ev.track_ids)))
-                inc.t = min(inc.t, ev.t)
-                had_smoke = inc.meta.get("has_smoke", False) or inc.kind == "smoke"
-                smoke_area = inc.meta.get("smoke_area", 0.0)
+                # Recency (not earliest-event time) drives both the merge
+                # window and expiry — using min() here used to anchor the
+                # incident to its very first sub-event, so a still-unfolding
+                # crash (collision -> speed_drop -> anomaly_stop arriving
+                # seconds apart) could get pruned or split into a second
+                # "new" incident even while events kept arriving.
+                inc.first_t = min(inc.first_t, ev.t)
+                inc.t = max(inc.t, ev.t)
                 if EVENT_PRIORITY.get(ev.kind, 0) > EVENT_PRIORITY.get(inc.kind, 0):
                     # More severe kind wins the identity; keep the merged tracks.
                     inc.kind = ev.kind
                     inc.meta = dict(ev.meta)
                     inc.cx, inc.cy = cx, cy
                     inc.consecutive_frames = ev.consecutive_frames
-                # Carry smoke evidence onto the incident so severity can boost
-                # the alert: a collision + growing dust cloud is more serious.
-                if ev.kind == "smoke" or had_smoke:
-                    if had_smoke:
-                        inc.meta["has_smoke"] = True
-                        inc.meta["smoke_area"] = max(smoke_area,
-                                                     ev.meta.get("area", 0.0),
-                                                     ev.meta.get("smoke_area", 0.0))
-                    else:
-                        inc.meta["has_smoke"] = True
-                        inc.meta["smoke_area"] = max(ev.meta.get("area", 0.0),
-                                                     ev.meta.get("smoke_area", 0.0))
 
         # Forget incidents once they can no longer merge with new events.
         cutoff = t - self.window_s * 2
