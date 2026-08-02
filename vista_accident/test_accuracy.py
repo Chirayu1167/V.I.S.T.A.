@@ -157,9 +157,61 @@ def test_partial_speed_drop():
     print("PASS: 70% velocity drop -> speed_drop alert")
 
 
+def test_delayed_kind_fused():
+    """A crash FIRST fires collision/jerk, then the SAME crash again several
+    seconds later as smoke at the same spot must stay ONE incident — one
+    dispatched alert — not two cards with different kinds."""
+    det = ScriptedDetector()
+    p = AccidentPipeline(detector=det, tracker=Tracker(frame_rate=int(FPS)),
+                         heuristic_cfg=HeuristicConfig(smoke_min_area_px=900,
+                                                       smoke_max_area_px=40000),
+                         camera_cfg=CameraConfig(camera_id="FUSE"),
+                         dispatch_cfg=DispatchConfig(dashboard_log_path="test_alerts.jsonl"),
+                         fps_hint=FPS, use_ml_speed=False)
+    # Two cars approach and freeze mid-overlap at frame 30 (collision), then
+    # the impact site starts kicking up a growing dust cloud from frame 70 on —
+    # exactly the crash->smoke seconds-later cascade.
+    script = []
+    car_a_x, car_b_x = 50.0, 1270.0
+    for i in range(160):
+        dets = []
+        if i < 30:
+            car_a_x += 20
+            car_b_x -= 20
+        else:
+            car_a_x += 0.2  # froze at impact, residual jitter
+            car_b_x -= 0.2
+        dets.append(((car_a_x, 400, car_a_x + 130, 480), 0.9, 2))
+        dets.append(((car_b_x, 400, car_b_x + 130, 480), 0.9, 2))
+        script.append(dets)
+    det.script = script
+
+    def maker(i):
+        f = make_frame()
+        if i >= 70:  # delayed dust cloud at the impact point
+            add_smoke(f, 640, 440, 30 + (i - 70) * 3)
+        # Kit over: the smoke must appear at the CRASH spot, which here is
+        # the frame center.
+        return f
+
+    evs = run(p, 120, maker)
+    kinds = sorted(set(k for _, k, _ in evs))
+    dispatched = sum(1 for _, _, s in p.confirmed_log if s == "dispatched")
+    print(f"[fuse] events={len(evs)} kinds={kinds} dispatched={dispatched}")
+    assert "collision" in kinds, "FAIL: collision not detected"
+    assert dispatched == 1, f"FAIL: same crash fired {dispatched} alerts — should be 1"
+    # The delayed smoke must have been CONFIRMED by the verifier and fused into
+    # the collision incident (has_smoke carries the severity boost) — a merged
+    # sub-event does not re-emit as a new ConfirmedEvent.
+    inc = p.fuser._incidents[0]
+    assert inc.meta.get("has_smoke"), "FAIL: smoke evidence lost — should ride on the collision incident"
+    print("PASS: collision then delayed smoke at same spot -> ONE alert (smoke fused, severity boosts)")
+
+
 if __name__ == "__main__":
     test_smoke()
     test_jerk_wall_crash()
     test_signal_stop_suppressed()
     test_partial_speed_drop()
+    test_delayed_kind_fused()
     print("\nALL NEW-FEATURE TESTS PASSED")

@@ -36,9 +36,11 @@ class _Incident:
 class IncidentFuser:
     """Groups confirmed events across a short window into incidents."""
 
-    def __init__(self, window_s: float = 1.5, radius_px: float = 120.0):
+    def __init__(self, window_s: float = 1.5, radius_px: float = 120.0,
+                 grace_s: float = 15.0):
         self.window_s = window_s
         self.radius_px = radius_px
+        self.grace_s = grace_s
         self._incidents: List[_Incident] = []
 
     def process(self, t: float, events: List[ConfirmedEvent]) -> List[ConfirmedEvent]:
@@ -80,20 +82,34 @@ class IncidentFuser:
                                                  ev.meta.get("area", 0.0),
                                                  ev.meta.get("smoke_area", 0.0) or 0.0)
 
-        # Forget incidents once they can no longer merge with new events.
-        cutoff = t - self.window_s * 2
+        # Forget incidents once they can no longer merge with new events. The
+        # expiry must cover the GRACE window too — a smoke/anomaly_stop signal
+        # can legitimately arrive many seconds after impact and must still be
+        # able to join its incident (never spawn a fresh one on its own spot).
+        cutoff = t - max(self.grace_s, self.window_s * 2)
         self._incidents = [i for i in self._incidents if i.t > cutoff]
         return merged
 
     def _find_incident(self, t: float, ev: ConfirmedEvent, cx: float, cy: float) -> _Incident:
         best = None
         for inc in self._incidents:
-            if t - inc.t > self.window_s:
+            gap = t - inc.t
+            if gap > self.grace_s:
                 continue
+            # FAST path (window_s): shared vehicles, or same spot — either is
+            # enough to prove the SAME crash.
             if set(inc.track_ids) & set(ev.track_ids):
-                return inc  # shared vehicles — same incident
+                if gap <= self.window_s:
+                    return inc  # shared vehicles & close in time — same incident
+            # GRACE path (window_s < gap <= grace_s): a delayed sub-event (the
+            # smoke cloud that only shows seconds after impact, the anomaly_stop
+            # that needs a couple stationary seconds) joins a RECENT incident at
+            # the same spot — but only by PROXIMITY, so it never invents a new
+            # crash of its own. Track-only matches are intentionally excluded
+            # here: a parked vehicle can re-share an old track id without being
+            # proof of a crime.
             if cx and cy and inc.cx and inc.cy:
                 dist = ((inc.cx - cx) ** 2 + (inc.cy - cy) ** 2) ** 0.5
-                if dist <= self.radius_px and best is None:
+                if dist <= self.radius_px:
                     best = inc  # same spot — merge into oldest nearby incident
         return best
