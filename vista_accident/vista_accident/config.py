@@ -134,11 +134,6 @@ class HeuristicConfig:
     # each produces its own clip + screenshots. Alerts at the same spot within
     # this window are merged into a single incident (see fusion.py).
     fusion_window_s: float = 6.0
-    fusion_grace_s: float = 15.0            # a delayed sub-event (e.g. smoke that only
-                                            # shows seconds after impact) can still join a
-                                            # recent incident if it is spatially close —
-                                            # but it must NEVER spawn a new incident on its
-                                            # own. One crash = one incident = one alert.
     fusion_radius_px: float = 120.0         # how close two spots must be to fuse
 
 

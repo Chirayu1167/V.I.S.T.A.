@@ -49,6 +49,15 @@ ALERT_PANEL_WIDTH = 400
 BEFORE_OFFSET_S = 0.6   # how far back the "before" shot is grabbed from
 AFTER_DELAY_S = 0.8     # how long after the alert the "after" shot is grabbed
 
+# Incident grouping (DISPLAY-ONLY — never suppresses a dispatch, only merges
+# how the SAME crash is presented). Multiple heuristic kinds of one physical
+# crash arrive a few seconds apart at the same spot (collision -> jerk ->
+# speed_drop -> smoke). These are grouped into a single report card with ONE
+# clip + ONE screenshot set so one accident = one card. Groups are tight:
+# same spot within INCIDENT_MERGE_S and INCIDENT_MERGE_PX, or shared tracks.
+INCIDENT_MERGE_S = 6.0
+INCIDENT_MERGE_PX = 200.0
+
 STYLE_SHEET = """
 QMainWindow { background-color: #1b1b1f; }
 QWidget { color: #e8e8ea; font-size: 12px; }
@@ -143,6 +152,42 @@ class VideoWorker(QThread):
                 break
         return best if best is not None else (buffer[0][1] if buffer else None)
 
+    def _nearest_incident(self, payload):
+        """Find an existing incident this alert belongs to, or None (new card).
+
+        Display-only merge: the SAME physical crash is detected several ways
+        (jerk, speed_drop, smoke, anomaly_stop) a few seconds apart, and its
+        vehicles scatter after impact (different centroids). So grouping is
+        TIME-based within INCIDENT_MERGE_S, tightened by scene proximity or a
+        shared track where available. This NEVER drops a dispatch — it only
+        decides whether the alert becomes a new card or joins an open one.
+        """
+        cx, cy = payload.meta.get("cx"), payload.meta.get("cy")
+        pids = set(payload.track_ids)
+        best = None
+        for inc in self._incidents:
+            if payload.timestamp - inc["t"] > INCIDENT_MERGE_S:
+                continue
+            if pids and pids & inc["tracks"]:
+                best = inc  # same vehicle — clearly the same crash
+                break
+            if cx is not None and cy is not None and inc["cx"] is not None:
+                dist = ((inc["cx"] - cx) ** 2 + (inc["cy"] - cy) ** 2) ** 0.5
+                if dist <= INCIDENT_MERGE_PX:
+                    best = inc
+                    break
+            if best is None:
+                best = inc  # time-window fallback: still the same scene
+        return best
+
+    def _find_clip_owner(self, alert_id):
+        """Map a sub-alert's clip file to its incident's primary alert id so
+        ALL clips of one crash land on the SAME card's Play button."""
+        for inc in getattr(self, "_incidents", []):
+            if alert_id in inc["clip"]:
+                return inc["clip"][0]
+        return None
+
     def run(self):
         try:
             cap = cv2.VideoCapture(self.source_path)
@@ -172,6 +217,7 @@ class VideoWorker(QThread):
 
             active_alerts = []
             pending_after = []  # [{"due_t":, "alert_id":}]
+            self._incidents = []  # display incidents: [{"t":, "cx":, "cy":, "tracks":set, "ids":[..]}]
             clips_saved = 0
             frame_idx = 0
 
@@ -193,11 +239,32 @@ class VideoWorker(QThread):
                 saved_clips = result.get("clips_saved", [])
                 clips_saved += len(saved_clips)
                 for vid, cpath in saved_clips:
+                    inc = self._find_clip_owner(vid)
+                    if inc is not None:
+                        vid = inc  # fold sub-alert clips into the incident's card
                     self.clip_ready.emit(vid, cpath)
 
                 for payload in result["alerts"]:
                     if not self._passes_filter(payload.severity):
                         continue
+                    inc = self._nearest_incident(payload)
+                    if inc is not None:
+                        # Same crash already shown as a card — fold this alert
+                        # in: no new card, no duplicate screenshots. Tracks and
+                        # extent widen so the group keeps capturing sub-events.
+                        inc["t"] = max(inc["t"], payload.timestamp)
+                        inc["tracks"] |= set(payload.track_ids)
+                        inc["clip"].append(payload.alert_id)
+                        active_alerts.append({"payload": payload, "fired_t": t})
+                        continue
+                    inc = {
+                        "t": payload.timestamp,
+                        "cx": payload.meta.get("cx"),
+                        "cy": payload.meta.get("cy"),
+                        "tracks": set(payload.track_ids),
+                        "clip": [payload.alert_id],
+                    }
+                    self._incidents.append(inc)
                     before_frame = self._lookup_before(raw_buffer, t - BEFORE_OFFSET_S)
                     shots = {
                         "before": self._save_shot(payload.alert_id, "before", before_frame)
@@ -206,13 +273,13 @@ class VideoWorker(QThread):
                         "after": None,
                     }
                     active_alerts.append({"payload": payload, "fired_t": t})
-                    pending_after.append({"due_t": t + AFTER_DELAY_S, "alert_id": payload.alert_id})
+                    pending_after.append({"due": t + AFTER_DELAY_S, "alert_id": payload.alert_id})
                     self.alert_ready.emit(payload, shots)
 
                 if pending_after:
                     still_pending = []
                     for p in pending_after:
-                        if t >= p["due_t"]:
+                        if t >= p["due"]:
                             after_path = self._save_shot(p["alert_id"], "after", raw_copy)
                             self.shot_ready.emit(p["alert_id"], after_path)
                         else:

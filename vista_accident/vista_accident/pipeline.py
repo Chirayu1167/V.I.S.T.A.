@@ -70,7 +70,6 @@ class AccidentPipeline:
         self.fuser = IncidentFuser(
             window_s=self.cfg.fusion_window_s,
             radius_px=self.cfg.fusion_radius_px,
-            grace_s=self.cfg.fusion_grace_s,
         )
         self.severity = SeverityAssessor(severity_cfg)
         self.secondary = secondary or SecondaryConfirmation(weights_path=None)
