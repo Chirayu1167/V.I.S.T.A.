@@ -155,30 +155,16 @@ class VideoWorker(QThread):
     def _nearest_incident(self, payload):
         """Find an existing incident this alert belongs to, or None (new card).
 
-        Display-only merge: the SAME physical crash is detected several ways
-        (jerk, speed_drop, smoke, anomaly_stop) a few seconds apart, and its
-        vehicles scatter after impact (different centroids). So grouping is
-        TIME-based within INCIDENT_MERGE_S, tightened by scene proximity or a
-        shared track where available. This NEVER drops a dispatch — it only
-        decides whether the alert becomes a new card or joins an open one.
+        DISABLED: the earlier display merge folded every alert within
+        INCIDENT_MERGE_S into the nearest open incident (with a time-only
+        fallback that ignored distance), so real 2nd/3rd accidents at the
+        same spot a few seconds later were silently eaten — users saw "1st
+        and 3rd crash detected, 2nd and 4th missing". Screenshots/clips of a
+        later crash landed on the earlier crash's card. Every dispatch now
+        creates its OWN card + screenshot set again (the pipeline fuser
+        still collapses sub-event kinds of a single crash).
         """
-        cx, cy = payload.meta.get("cx"), payload.meta.get("cy")
-        pids = set(payload.track_ids)
-        best = None
-        for inc in self._incidents:
-            if payload.timestamp - inc["t"] > INCIDENT_MERGE_S:
-                continue
-            if pids and pids & inc["tracks"]:
-                best = inc  # same vehicle — clearly the same crash
-                break
-            if cx is not None and cy is not None and inc["cx"] is not None:
-                dist = ((inc["cx"] - cx) ** 2 + (inc["cy"] - cy) ** 2) ** 0.5
-                if dist <= INCIDENT_MERGE_PX:
-                    best = inc
-                    break
-            if best is None:
-                best = inc  # time-window fallback: still the same scene
-        return best
+        return None
 
     def _find_clip_owner(self, alert_id):
         """Map a sub-alert's clip file to its incident's primary alert id so
@@ -246,16 +232,6 @@ class VideoWorker(QThread):
 
                 for payload in result["alerts"]:
                     if not self._passes_filter(payload.severity):
-                        continue
-                    inc = self._nearest_incident(payload)
-                    if inc is not None:
-                        # Same crash already shown as a card — fold this alert
-                        # in: no new card, no duplicate screenshots. Tracks and
-                        # extent widen so the group keeps capturing sub-events.
-                        inc["t"] = max(inc["t"], payload.timestamp)
-                        inc["tracks"] |= set(payload.track_ids)
-                        inc["clip"].append(payload.alert_id)
-                        active_alerts.append({"payload": payload, "fired_t": t})
                         continue
                     inc = {
                         "t": payload.timestamp,

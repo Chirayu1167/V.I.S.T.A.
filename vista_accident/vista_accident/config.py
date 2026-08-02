@@ -129,7 +129,10 @@ class HeuristicConfig:
     # whole cascade, otherwise one crash is split into several incidents and
     # each produces its own clip + screenshots. Alerts at the same spot within
     # this window are merged into a single incident (see fusion.py).
-    fusion_window_s: float = 6.0
+    # NOTE: was temporarily 6.0s, which fused the 2nd/4th accidents into the
+    # 1st/3rd (same spot, a few seconds later) and swallowed real crashes —
+    # restored to the 1.5s baseline so distinct accidents dispatch separately.
+    fusion_window_s: float = 1.5
     fusion_radius_px: float = 120.0         # how close two spots must be to fuse
 
 
