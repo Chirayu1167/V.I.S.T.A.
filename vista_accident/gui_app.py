@@ -51,8 +51,8 @@ AFTER_DELAY_S = 0.8     # how long after the alert the "after" shot is grabbed
 
 # Incident grouping (DISPLAY-ONLY — never suppresses a dispatch, only merges
 # how the SAME crash is presented). Multiple heuristic kinds of one physical
-# crash arrive a few seconds apart at the same spot (collision -> jerk ->
-# speed_drop -> smoke). These are grouped into a single report card with ONE
+# crash arrive a few seconds apart at the same spot (collision ->
+# speed_drop). These are grouped into a single report card with ONE
 # clip + ONE screenshot set so one accident = one card. Groups are tight:
 # same spot within INCIDENT_MERGE_S and INCIDENT_MERGE_PX, or shared tracks.
 INCIDENT_MERGE_S = 6.0

@@ -1,9 +1,8 @@
 """
-Quick validation of the four accuracy improvements:
-  1. smoke detection fires on a growing gray dust cloud
-  2. jerk fires on a single-vehicle impact into a wall (no second track)
-  3. stopped cars at a signal (jam of 3+) do NOT alert
-  4. speed_drop catches a ~70% velocity drop that the old 80% threshold missed
+Quick validation of the accuracy improvements:
+  1. stopped cars at a signal (jam of 3+) do NOT alert
+  2. speed_drop catches a ~70% velocity drop that the old 80% threshold missed
+  3. collision detection fires on a two-vehicle overlap with impact signature
 """
 import numpy as np
 
@@ -30,18 +29,6 @@ def make_frame(w=1280, h=720):
     return np.full((h, w, 3), 60, dtype=np.uint8)
 
 
-def add_smoke(frame, cx, cy, radius, intensity=190):
-    """Paint a soft gray blob (gaussian falloff) — mimics dust/smoke."""
-    yy, xx = np.mgrid[0:frame.shape[0], 0:frame.shape[1]]
-    d = ((xx - cx) ** 2 + (yy - cy) ** 2) ** 0.5
-    mask = np.clip(1.0 - d / radius, 0, 1) ** 2
-    m3 = mask[..., None]
-    gray = np.full_like(frame, intensity, dtype=np.float32)
-    blend = frame.astype(np.float32) * (1 - m3) + gray * m3
-    frame[...] = blend.astype(np.uint8)
-    return frame
-
-
 def run(pipeline, n_frames, frame_maker):
     events = []
     for i in range(n_frames):
@@ -53,36 +40,10 @@ def run(pipeline, n_frames, frame_maker):
     return events
 
 
-def test_smoke():
-    det = ScriptedDetector()
-    p = AccidentPipeline(detector=det, tracker=Tracker(frame_rate=int(FPS)),
-                         heuristic_cfg=HeuristicConfig(smoke_detector_enabled=True,
-                                                       smoke_min_area_px=300,
-                                                       smoke_max_area_px=40000),
-                         camera_cfg=CameraConfig(camera_id="SMOKE"),
-                         dispatch_cfg=DispatchConfig(dashboard_log_path="test_alerts.jsonl"),
-                         fps_hint=FPS, use_ml_speed=False)
-    det.script = [[]] * 120
-    radius = 30
-
-    def maker(i):
-        f = make_frame()
-        if i >= 10:
-            radius_i = radius + (i - 10) * 3  # cloud grows over frames
-            add_smoke(f, 640, 400, radius_i)
-        return f
-
-    evs = run(p, 120, maker)
-    kinds = sorted(set(k for _, k, _ in evs))
-    print(f"[smoke] events={len(evs)} kinds={kinds}")
-    assert "smoke" in kinds, "FAIL: smoke not detected"
-    print("PASS: growing dust cloud -> smoke alert")
-
-
 def test_wall_crash_speed_drop():
-    """Single-vehicle crash into a wall: with jerk removed (yesterday's
-    tuning), this is caught by speed_drop instead — the car goes from fast to
-    dead-stop in one frame, a >80% drop the windowed reading sees."""
+    """Single-vehicle crash into a wall: caught by speed_drop — the car goes
+    from fast to dead-stop in one frame, a >80% drop the windowed reading
+    sees."""
     det = ScriptedDetector()
     p = AccidentPipeline(detector=det, tracker=Tracker(frame_rate=int(FPS)),
                          heuristic_cfg=HeuristicConfig(),
@@ -182,21 +143,15 @@ def test_hard_stop_speed_drop():
     print("PASS: 70% braking at light -> no speed_drop alert")
 
 
-def test_delayed_kind_fused():
-    """A crash FIRST fires collision/jerk, then the SAME crash again several
-    seconds later as smoke at the same spot must stay ONE incident — one
-    dispatched alert — not two cards with different kinds."""
+def test_collision():
+    """Two cars approach head-on and freeze mid-overlap: the collision
+    heuristic (IoU overlap + impact signature) fires and dispatches."""
     det = ScriptedDetector()
     p = AccidentPipeline(detector=det, tracker=Tracker(frame_rate=int(FPS)),
-                         heuristic_cfg=HeuristicConfig(smoke_detector_enabled=True,
-                                                       smoke_min_area_px=900,
-                                                       smoke_max_area_px=40000),
+                         heuristic_cfg=HeuristicConfig(),
                          camera_cfg=CameraConfig(camera_id="FUSE"),
                          dispatch_cfg=DispatchConfig(dashboard_log_path="test_alerts.jsonl"),
                          fps_hint=FPS, use_ml_speed=False)
-    # Two cars approach and freeze mid-overlap at frame 30 (collision), then
-    # the impact site starts kicking up a growing dust cloud from frame 70 on —
-    # exactly the crash->smoke seconds-later cascade.
     script = []
     car_a_x, car_b_x = 50.0, 1270.0
     for i in range(160):
@@ -212,32 +167,18 @@ def test_delayed_kind_fused():
         script.append(dets)
     det.script = script
 
-    def maker(i):
-        f = make_frame()
-        if i >= 70:  # delayed dust cloud at the impact point
-            add_smoke(f, 640, 440, 30 + (i - 70) * 3)
-        # Kit over: the smoke must appear at the CRASH spot, which here is
-        # the frame center.
-        return f
-
-    evs = run(p, 120, maker)
+    evs = run(p, 120, make_frame)
     kinds = sorted(set(k for _, k, _ in evs))
     dispatched = sum(1 for _, _, s in p.confirmed_log if s == "dispatched")
     print(f"[fuse] events={len(evs)} kinds={kinds} dispatched={dispatched}")
     assert "collision" in kinds, "FAIL: collision not detected"
-    assert dispatched == 1, f"FAIL: same crash fired {dispatched} alerts — should be 1"
-    # The delayed smoke must have been CONFIRMED by the verifier and fused into
-    # the collision incident (has_smoke carries the severity boost) — a merged
-    # sub-event does not re-emit as a new ConfirmedEvent.
-    inc = p.fuser._incidents[0]
-    assert inc.meta.get("has_smoke"), "FAIL: smoke evidence lost — should ride on the collision incident"
-    print("PASS: collision then delayed smoke at same spot -> ONE alert (smoke fused, severity boosts)")
+    assert dispatched >= 1, f"FAIL: collision did not dispatch"
+    print("PASS: head-on collision -> dispatched alert")
 
 
 if __name__ == "__main__":
-    test_smoke()
     test_wall_crash_speed_drop()
     test_signal_stop_suppressed()
     test_hard_stop_speed_drop()
-    test_delayed_kind_fused()
-    print("\nALL NEW-FEATURE TESTS PASSED")
+    test_collision()
+    print("\nALL ACCURACY TESTS PASSED")

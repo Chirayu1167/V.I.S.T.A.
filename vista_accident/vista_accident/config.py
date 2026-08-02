@@ -80,32 +80,6 @@ class HeuristicConfig:
     # radius are treated as a queue too.
     traffic_jam_max_gap_px: float = 90.0
 
-    # --- Signal 5: jerk / impact shock (crash into wall, median, object) ---
-    # A vehicle hitting a fixed obstacle produces a violent deceleration spike
-    # (jerk) that a collision (needs 2 tracks) or a slow windowed speed_drop
-    # cannot see. Thresholds in m/s² — normal braking ~2-4 m/s², impacts >8.
-    jerk_min_decel: float = 8.0         # m/s² — peak deceleration in the window
-    jerk_min_prior_speed: float = 2.0   # m/s — must have been moving meaningfully
-    jerk_window_s: float = 0.3          # window over which the spike must occur
-
-    # --- Signal 6: smoke/dust cloud (crash aftermath signature) ---
-    # A hard impact (wall, tree, another car) throws up a dust/smoke cloud that
-    # grows over a second or two. Purely CV (no extra model): smoke is a large,
-    # grayish (low saturation), low-texture, growing blob.
-    smoke_min_area_px: float = 900.0       # smallest blob worth considering
-    smoke_max_area_px: float = 40000.0     # ignore blobs that cover the whole frame (fog)
-    smoke_max_saturation: int = 50         # HSV S — smoke/dust is gray, not colored
-    smoke_min_value: int = 110             # HSV V — smoke is mid-bright
-    smoke_max_value: int = 245
-    smoke_max_local_std: int = 22          # low texture (blurred haze), not a busy object
-    smoke_growth_ratio: float = 1.25       # blob must grow >25% vs first-seen area
-    smoke_persist_frames: int = 5          # blob must persist this many frames
-    # Off by default — restored to yesterday's tuning. Smoke/dust as its own
-    # alert kind was splitting one crash into extra cards and masking the real
-    # collision classification (A/B: clip_03 collision -> jerk+smoke, no
-    # collision). Can be re-enabled with --heuristics smoke_detector_enabled=true.
-    smoke_detector_enabled: bool = False
-
     # --- Signal 4: hit-and-run (vehicle-pedestrian intersection + ped velocity crash) ---
     hitrun_iou_threshold: float = 0.15
     hitrun_ped_velocity_drop: float = 0.9   # >90% drop
@@ -116,16 +90,14 @@ class HeuristicConfig:
     verify_window_frames_by_kind: Dict[str, int] = field(default_factory=lambda: {
         # Fast impacts overlap for only a few frames — confirm quicker.
         "collision": 3,
-        "jerk": 3,          # impact spikes are 3-5 frames long
-        "smoke": 4,         # dust cloud must persist a moment before alerting
     })
     verify_cooldown_s: float = 15.0         # suppress repeated alerts for same track/pair
     verify_dedup_radius_px: float = 90.0    # suppress re-confirmations of the same physical
                                             # incident even if tracker re-assigned track IDs
 
     # --- Incident fusion (one alert per crash) ---
-    # Sub-events of the SAME physical crash (collision -> smoke -> speed_drop
-    # -> anomaly_stop) can arrive seconds apart. Fusion window must cover the
+    # Sub-events of the SAME physical crash (collision -> speed_drop ->
+    # anomaly_stop) can arrive seconds apart. Fusion window must cover the
     # whole cascade, otherwise one crash is split into several incidents and
     # each produces its own clip + screenshots. Alerts at the same spot within
     # this window are merged into a single incident (see fusion.py).

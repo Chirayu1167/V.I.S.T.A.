@@ -195,36 +195,6 @@ class TrackHistory:
                 break
         return end_t - start_t
 
-    def deceleration(self, track_id: int, window_s: float) -> Optional[float]:
-        """Peak positive deceleration (m/s²) over the last `window_s` seconds.
-        Delegates to the ML estimator (m/s²) when available; otherwise reads the
-        raw pixel series directly (scaled to m/s² via meter_per_pixel)."""
-        if self.speed_estimator is not None:
-            return self.speed_estimator.deceleration(track_id, window_s)
-
-        buf = self.tracks.get(track_id)
-        if not buf or len(buf) < 3:
-            return None
-        pts = list(buf)
-        cutoff = pts[-1].t - window_s
-        seg = [p for p in pts if p.t >= cutoff]
-        vs = []
-        for i in range(1, len(seg)):
-            dt = seg[i].t - seg[i - 1].t
-            if dt <= 0:
-                continue
-            dist_px = ((seg[i].cx - seg[i - 1].cx) ** 2 + (seg[i].cy - seg[i - 1].cy) ** 2) ** 0.5
-            vs.append((seg[i].t, (dist_px * self.meter_per_pixel) / dt))
-        if len(vs) < 2:
-            return None
-        decels = []
-        for i in range(1, len(vs)):
-            dt = vs[i][0] - vs[i - 1][0]
-            if dt <= 0:
-                continue
-            decels.append((vs[i - 1][1] - vs[i][1]) / dt)
-        return max(0.0, max(decels)) if decels else None
-
     def active_ids(self, cls_filter=None, include_stale: bool = False) -> List[int]:
         """Track ids to run heuristics against.
 

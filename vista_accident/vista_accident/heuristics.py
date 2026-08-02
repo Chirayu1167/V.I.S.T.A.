@@ -20,20 +20,15 @@ from .speed_estimator import TrackSpeed
 
 @dataclass
 class RawTrigger:
-    kind: str                  # "speed_drop" | "collision" | "anomaly_stop" | "hit_and_run" | "jerk" | "smoke"
-    track_ids: Tuple[int, ...]  # 1 id for speed_drop/anomaly_stop/jerk, 2 for collision/hit_and_run, () for smoke
+    kind: str                  # "speed_drop" | "collision" | "anomaly_stop" | "hit_and_run"
+    track_ids: Tuple[int, ...]  # 1 id for speed_drop/anomaly_stop, 2 for collision/hit_and_run
     t: float
     meta: dict = field(default_factory=dict)
 
     @property
     def key(self) -> str:
         """Stable dedup/verification key for this event instance."""
-        if self.track_ids:
-            return f"{self.kind}:{'-'.join(str(i) for i in sorted(self.track_ids))}"
-        # Trackless kinds (smoke) key by location so different clouds don't
-        # share one verification streak.
-        cx, cy = self.meta.get("cx", 0.0), self.meta.get("cy", 0.0)
-        return f"{self.kind}:{int(cx // 40)},{int(cy // 40)}"
+        return f"{self.kind}:{'-'.join(str(i) for i in sorted(self.track_ids))}"
 
 
 def check_speed_drop(history: TrackHistory, t: float, cfg: HeuristicConfig,

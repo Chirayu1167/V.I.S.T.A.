@@ -94,12 +94,8 @@ class Verifier:
         return confirmed
 
     def _recently_confirmed(self, trig: RawTrigger, t: float) -> bool:
-        """Dedup re-confirmations of the SAME physical incident — but per-kind
-        only. Cross-kind dedup (suppressing the smoke that arrives AFTER a
-        confirmed collision) deliberately lives in the FUSER's grace window,
-        NOT here: the verifier still CONFIRMS the delayed smoke so its evidence
-        (has_smoke severity boost) can merge into the incident, while the fuser
-        guarantees it never becomes a second card/dispatch."""
+        """Dedup re-confirmations of the SAME physical incident — per-kind
+        only (same tracker IDs or same spot within the cooldown)."""
         for r_t, r_kind, r_cx, r_cy, r_ids in self._recent_confirmed:
             if r_kind != trig.kind:
                 continue
