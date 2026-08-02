@@ -44,6 +44,7 @@ from vista_accident.confirmation import SecondaryConfirmation
 from vista_accident.render import SEVERITY_COLORS, SEVERITY_RANK, SpeedEstimator, draw_overlay
 
 SCREENSHOT_DIR = "vista_screenshots"
+CLIP_DIR = "vista_clips"          # per-alert video clips (pre/post impact), saved when a pipeline runs
 ALERT_PANEL_WIDTH = 400
 BEFORE_OFFSET_S = 0.6   # how far back the "before" shot is grabbed from
 AFTER_DELAY_S = 0.8     # how long after the alert the "after" shot is grabbed
@@ -100,7 +101,8 @@ class VideoWorker(QThread):
 
     def __init__(self, source_path, device="cpu", px_per_meter=None,
                  alert_display_seconds=4.0, min_severity="low",
-                 camera_id="CAM-01", location="Uploaded Video", parent=None):
+                 camera_id="CAM-01", location="Uploaded Video",
+                 clip_dir=CLIP_DIR, parent=None):
         super().__init__(parent)
         self.source_path = source_path
         self.device = device
@@ -109,6 +111,7 @@ class VideoWorker(QThread):
         self.min_severity = min_severity
         self.camera_id = camera_id
         self.location = location
+        self.clip_dir = clip_dir
         self._stop = False
         self._pause = False
 
@@ -157,6 +160,7 @@ class VideoWorker(QThread):
                 dispatch_cfg=DispatchConfig(dashboard_log_path="alerts.jsonl"),
                 secondary=SecondaryConfirmation(weights_path=None, device=self.device),
                 fps_hint=fps,
+                clip_dir=self.clip_dir,
             )
             speed_estimator = SpeedEstimator(manual_px_per_meter=self.px_per_meter)
 
@@ -167,6 +171,7 @@ class VideoWorker(QThread):
 
             active_alerts = []
             pending_after = []  # [{"due_t":, "alert_id":}]
+            clips_saved = 0
             frame_idx = 0
 
             while not self._stop:
@@ -184,6 +189,7 @@ class VideoWorker(QThread):
                 raw_buffer.append((t, raw_copy))
 
                 result = pipeline.process_frame(frame, t)
+                clips_saved += result.get("clips_saved", 0)
 
                 for payload in result["alerts"]:
                     if not self._passes_filter(payload.severity):
@@ -236,8 +242,16 @@ class VideoWorker(QThread):
             n_dispatched = sum(1 for _, _, status in pipeline.confirmed_log if status == "dispatched")
             self.finished_processing.emit({
                 "frames": frame_idx, "confirmed": n_alerts, "dispatched": n_dispatched,
+                "clips_saved": clips_saved,
             })
         except Exception as e:  # surface errors in the UI instead of a silent thread death
+            import traceback
+            tb = traceback.format_exc()
+            try:
+                with open("gui_error.log", "a") as f:
+                    f.write(f"--- {datetime.now().isoformat()} source={self.source_path} ---\n{tb}\n")
+            except OSError:
+                pass
             self.error.emit(str(e))
             try:
                 pipeline.close()
@@ -535,9 +549,11 @@ class MainWindow(QMainWindow):
             self.progress_bar.setMaximum(0)  # indeterminate
 
     def on_finished(self, summary):
+        clips = summary.get("clips_saved", 0)
         self.status_label.setText(
             f"Done — {summary['frames']} frames processed, "
-            f"{summary['confirmed']} confirmed, {summary['dispatched']} dispatched."
+            f"{summary['confirmed']} confirmed, {summary['dispatched']} dispatched, "
+            f"{clips} clip(s) saved to {CLIP_DIR}."
         )
         self.pause_btn.setEnabled(False)
         self.stop_btn.setEnabled(False)

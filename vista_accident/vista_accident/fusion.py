@@ -16,7 +16,7 @@ from typing import List
 
 from .verification import ConfirmedEvent
 
-EVENT_PRIORITY = {"hit_and_run": 4, "collision": 3, "speed_drop": 2, "anomaly_stop": 1}
+EVENT_PRIORITY = {"hit_and_run": 5, "collision": 4, "smoke": 3, "jerk": 3, "speed_drop": 2, "anomaly_stop": 1}
 
 
 class _Incident:
@@ -64,12 +64,21 @@ class IncidentFuser:
                 # "new" incident even while events kept arriving.
                 inc.first_t = min(inc.first_t, ev.t)
                 inc.t = max(inc.t, ev.t)
+                had_smoke = inc.meta.get("has_smoke", False) or inc.kind == "smoke"
+                smoke_area = inc.meta.get("smoke_area", 0.0) or 0.0
                 if EVENT_PRIORITY.get(ev.kind, 0) > EVENT_PRIORITY.get(inc.kind, 0):
                     # More severe kind wins the identity; keep the merged tracks.
                     inc.kind = ev.kind
                     inc.meta = dict(ev.meta)
                     inc.cx, inc.cy = cx, cy
                     inc.consecutive_frames = ev.consecutive_frames
+                # Carry smoke evidence onto the incident so severity can boost
+                # the alert: a collision + growing dust cloud is more serious.
+                if ev.kind == "smoke" or had_smoke or inc.kind == "smoke":
+                    inc.meta["has_smoke"] = True
+                    inc.meta["smoke_area"] = max(smoke_area,
+                                                 ev.meta.get("area", 0.0),
+                                                 ev.meta.get("smoke_area", 0.0) or 0.0)
 
         # Forget incidents once they can no longer merge with new events.
         cutoff = t - self.window_s * 2
