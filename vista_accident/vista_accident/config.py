@@ -127,6 +127,15 @@ class HeuristicConfig:
     verify_dedup_radius_px: float = 90.0    # suppress re-confirmations of the same physical
                                             # incident even if tracker re-assigned track IDs
 
+    # --- Incident fusion (one alert per crash) ---
+    # Sub-events of the SAME physical crash (collision -> smoke -> speed_drop
+    # -> anomaly_stop) can arrive seconds apart. Fusion window must cover the
+    # whole cascade, otherwise one crash is split into several incidents and
+    # each produces its own clip + screenshots. Alerts at the same spot within
+    # this window are merged into a single incident (see fusion.py).
+    fusion_window_s: float = 6.0
+    fusion_radius_px: float = 120.0         # how close two spots must be to fuse
+
 
 @dataclass
 class CameraConfig:

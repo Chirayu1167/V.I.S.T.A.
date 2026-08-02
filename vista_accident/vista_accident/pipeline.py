@@ -67,7 +67,10 @@ class AccidentPipeline:
             meter_per_pixel=getattr(self.camera_cfg, "meter_per_pixel", 0.05),
         )
         self.verifier = Verifier(self.cfg)
-        self.fuser = IncidentFuser()
+        self.fuser = IncidentFuser(
+            window_s=self.cfg.fusion_window_s,
+            radius_px=self.cfg.fusion_radius_px,
+        )
         self.severity = SeverityAssessor(severity_cfg)
         self.secondary = secondary or SecondaryConfirmation(weights_path=None)
         self.dispatcher = AlertDispatcher(self.camera_cfg, self.dispatch_cfg)
