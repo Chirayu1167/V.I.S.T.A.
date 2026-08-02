@@ -30,8 +30,8 @@ from datetime import datetime
 
 import cv2
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QImage, QPixmap, QFont
+from PyQt5.QtCore import Qt, QThread, QUrl, pyqtSignal
+from PyQt5.QtGui import QImage, QPixmap, QFont, QDesktopServices
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton, QVBoxLayout,
     QHBoxLayout, QFileDialog, QScrollArea, QFrame, QProgressBar, QComboBox,
@@ -95,6 +95,7 @@ class VideoWorker(QThread):
     frame_ready = pyqtSignal(object)              # annotated BGR frame (np.ndarray)
     alert_ready = pyqtSignal(object, dict)        # AlertPayload, {"before":,"impact":,"after":}
     shot_ready = pyqtSignal(str, str)             # alert_id, after-screenshot path
+    clip_ready = pyqtSignal(str, str)             # alert_id, clip path (written a few frames after dispatch)
     progress = pyqtSignal(int, int)               # frame_idx, total_frames
     finished_processing = pyqtSignal(dict)        # summary stats
     error = pyqtSignal(str)
@@ -189,7 +190,10 @@ class VideoWorker(QThread):
                 raw_buffer.append((t, raw_copy))
 
                 result = pipeline.process_frame(frame, t)
-                clips_saved += len(result.get("clips_saved", []))
+                saved_clips = result.get("clips_saved", [])
+                clips_saved += len(saved_clips)
+                for vid, cpath in saved_clips:
+                    self.clip_ready.emit(vid, cpath)
 
                 for payload in result["alerts"]:
                     if not self._passes_filter(payload.severity):
@@ -348,8 +352,25 @@ class AlertCard(QFrame):
         strip.addStretch(1)
         outer.addLayout(strip)
 
+        self.clip_btn = QPushButton("Play clip")
+        self.clip_btn.setToolTip("Open the saved pre/post-impact video clip for this alert")
+        self.clip_btn.setEnabled(False)
+        self.clip_btn.clicked.connect(lambda: self._play_clip())
+        outer.addWidget(self.clip_btn)
+
     def set_after_shot(self, path):
         self.thumb_after.set_path(path)
+
+    def set_clip_path(self, path):
+        self._clip_path = path
+        self.clip_btn.setEnabled(path and os.path.exists(path))
+        self.clip_btn.setText("Play clip" if self.clip_btn.isEnabled() else "Clip not found")
+
+    def _play_clip(self):
+        cpath = getattr(self, "_clip_path", None)
+        if not cpath or not os.path.exists(cpath):
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(cpath))
 
 
 class MainWindow(QMainWindow):
@@ -500,6 +521,7 @@ class MainWindow(QMainWindow):
         self.worker.frame_ready.connect(self.on_frame)
         self.worker.alert_ready.connect(self.on_alert)
         self.worker.shot_ready.connect(self.on_shot_ready)
+        self.worker.clip_ready.connect(self.on_clip_ready)
         self.worker.progress.connect(self.on_progress)
         self.worker.finished_processing.connect(self.on_finished)
         self.worker.error.connect(self.on_error)
@@ -540,6 +562,11 @@ class MainWindow(QMainWindow):
         card = self.alert_cards.get(alert_id)
         if card:
             card.set_after_shot(after_path)
+
+    def on_clip_ready(self, alert_id, clip_path):
+        card = self.alert_cards.get(alert_id)
+        if card:
+            card.set_clip_path(clip_path)
 
     def on_progress(self, frame_idx, total_frames):
         if total_frames:
