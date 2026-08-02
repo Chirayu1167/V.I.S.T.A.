@@ -20,26 +20,39 @@ from .speed_estimator import TrackSpeed
 
 @dataclass
 class RawTrigger:
-    kind: str                  # "speed_drop" | "collision" | "anomaly_stop" | "hit_and_run"
-    track_ids: Tuple[int, ...]  # 1 id for speed_drop/anomaly_stop, 2 for collision/hit_and_run
+    kind: str                  # "speed_drop" | "collision" | "anomaly_stop" | "hit_and_run" | "jerk" | "smoke"
+    track_ids: Tuple[int, ...]  # 1 id for speed_drop/anomaly_stop/jerk, 2 for collision/hit_and_run, () for smoke
     t: float
     meta: dict = field(default_factory=dict)
 
     @property
     def key(self) -> str:
         """Stable dedup/verification key for this event instance."""
-        return f"{self.kind}:{'-'.join(str(i) for i in sorted(self.track_ids))}"
+        if self.track_ids:
+            return f"{self.kind}:{'-'.join(str(i) for i in sorted(self.track_ids))}"
+        # Trackless kinds (smoke) key by location so different clouds don't
+        # share one verification streak.
+        cx, cy = self.meta.get("cx", 0.0), self.meta.get("cy", 0.0)
+        return f"{self.kind}:{int(cx // 40)},{int(cy // 40)}"
 
 
 def check_speed_drop(history: TrackHistory, t: float, cfg: HeuristicConfig,
                      stop_zones=None) -> List[RawTrigger]:
     triggers = []
     stop_zones = stop_zones or []
+    # A queue braking together at a light/congestion is a normal stop, not an
+    # accident — reuse the same jam suppression as anomaly_stop.
+    jammed = _traffic_jam_track_ids(history, cfg)
     for tid in history.active_ids(cls_filter=VEHICLE_CLASSES):
-        # Both readings are windowed averages (previous window vs. current
-        # window) instead of raw instantaneous velocity, so a single jittery
-        # tracker frame cannot fake a "drop".
-        now_v = history.velocity_between(tid, t - cfg.speed_drop_window_s, t)
+        if tid in jammed:
+            continue  # part of a stationary queue — normal braking
+        # Prior speed is a windowed average (previous window vs. current
+        # window) so a single jittery tracker frame cannot fake a "drop".
+        # The AFTER reading uses the Kalman-smoothed instantaneous velocity
+        # instead of a windowed average: a window spanning the drop moment
+        # mixes pre-drop and post-drop samples and masks the drop itself,
+        # which is why some hard stops slipped through before.
+        now_v = history.instantaneous_velocity(tid)
         prior_v = history.velocity_between(
             tid, t - 2 * cfg.speed_drop_window_s, t - cfg.speed_drop_window_s)
         if prior_v is None or now_v is None:
@@ -50,7 +63,14 @@ def check_speed_drop(history: TrackHistory, t: float, cfg: HeuristicConfig,
         if p and _in_any_zone((p.cx, p.cy), stop_zones):
             continue  # legitimate braking at an intersection/bus stop — suppress
         drop_ratio = (prior_v - now_v) / prior_v
-        if drop_ratio > cfg.speed_drop_ratio:
+        # Either the vehicle lost most of its speed, or it ended up (nearly)
+        # stopped outright — the absolute-cap branch catches big stops whose
+        # ratio misses the bar by a little (but still requires a real drop,
+        # so a car crawling to a halt doesn't alert).
+        if drop_ratio > cfg.speed_drop_ratio or (
+            now_v <= cfg.speed_drop_max_now_speed
+            and drop_ratio > cfg.speed_drop_abs_min_ratio
+        ):
             # Include ML speed details if available
             ml_speed = history.get_ml_speed(tid)
             meta = {"prior_v": prior_v, "now_v": now_v, "drop_ratio": drop_ratio,
@@ -121,20 +141,61 @@ def check_collision(history: TrackHistory, t: float, cfg: HeuristicConfig) -> Li
     return triggers
 
 
+def check_jerk(history: TrackHistory, t: float, cfg: HeuristicConfig) -> List[RawTrigger]:
+    """Impact shock: a vehicle slamming into a fixed object (wall, median,
+    tree, parked truck) decelerates violently in a fraction of a second.
+    Speed_drop can't see it (its windowed average hides the spike) and
+    collision needs a second moving track — this catches single-vehicle
+    crashes from the Kalman-smoothed speed series. Requires the ML speed
+    estimator: deceleration thresholds are real m/s², which only calibrated
+    world coordinates provide."""
+    triggers = []
+    if history.speed_estimator is None:
+        return triggers  # no calibrated world speeds — can't trust px/s² numbers
+    for tid in history.active_ids(cls_filter=VEHICLE_CLASSES):
+        prior_v = history.velocity_between(
+            tid, t - 1.2, t - 0.2)
+        if prior_v is None or prior_v < cfg.jerk_min_prior_speed:
+            continue  # was already slow/stationary — braking, not impact
+        decel = history.deceleration(tid, cfg.jerk_window_s)
+        if decel is None or decel < cfg.jerk_min_decel:
+            continue  # normal braking (~2-4 m/s²) or coasting
+        now_v = history.instantaneous_velocity(tid)
+        if now_v is not None and now_v > cfg.speed_drop_max_now_speed:
+            continue  # still moving fast — this was a swerve, not an impact
+        p = history.latest(tid)
+        ml_speed = history.get_ml_speed(tid)
+        meta = {"prior_v": prior_v, "now_v": now_v, "decel": decel,
+                "cx": p.cx, "cy": p.cy}
+        if ml_speed:
+            meta["ml_speed_mps"] = ml_speed.speed_mps
+            meta["ml_speed_kmph"] = ml_speed.speed_kmph
+            meta["ml_world_pos"] = ml_speed.world_pos
+        triggers.append(RawTrigger(
+            kind="jerk", track_ids=(tid,), t=t, meta=meta,
+        ))
+    return triggers
+
+
 def _traffic_jam_track_ids(history: TrackHistory, cfg: HeuristicConfig) -> set:
     """Tracks that are part of a stationary queue (3+ stationary vehicles
-    within traffic_jam_max_gap_m of each other). A queue is a traffic jam or
-    a red light, not an incident, so anomaly_stop is suppressed for them.
-    Requires ML estimator world positions; returns empty otherwise."""
-    if history.speed_estimator is None:
-        return set()
+    close together). A queue is a traffic jam or a red light, not an
+    incident, so anomaly_stop is suppressed for them. Uses world-space
+    positions when the ML estimator is available, otherwise falls back to
+    pixel-space distance (same suppression, just coarser)."""
     stationary = {}
+    use_world = history.speed_estimator is not None
     for tid in history.active_ids(cls_filter=VEHICLE_CLASSES):
         v = history.instantaneous_velocity(tid)
         if v is not None and v <= cfg.anomaly_stop_max_velocity:
             ml = history.get_ml_speed(tid)
-            if ml is not None and ml.world_pos:
+            if use_world and ml is not None and ml.world_pos:
                 stationary[tid] = ml.world_pos
+            else:
+                p = history.latest(tid)
+                if p:
+                    stationary[tid] = (p.cx, p.cy)
+    max_gap = cfg.traffic_jam_max_gap_m if use_world else cfg.traffic_jam_max_gap_px
     ids = list(stationary.keys())
     parent = list(range(len(ids)))
 
@@ -154,7 +215,7 @@ def _traffic_jam_track_ids(history: TrackHistory, cfg: HeuristicConfig) -> set:
             xi, yi = stationary[ids[i]]
             xj, yj = stationary[ids[j]]
             gap = ((xi - xj) ** 2 + (yi - yj) ** 2) ** 0.5
-            if gap <= cfg.traffic_jam_max_gap_m:
+            if gap <= max_gap:
                 union(i, j)
 
     sizes = {}
@@ -174,11 +235,20 @@ def check_anomaly_stop(history: TrackHistory, t: float, cfg: HeuristicConfig, st
         duration = history.stationary_duration(tid, cfg.anomaly_stop_max_velocity)
         if duration < cfg.anomaly_stop_duration_s:
             continue
+        # A normal stop (red light / turning / crawling traffic) is preceded
+        # by gradual braking; a crashed car was moving meaningfully right up
+        # to the impact. Require prior motion so parked cars and cars that
+        # were never moving fast enough don't alert.
+        prior_v = history.velocity_between(
+            tid, t - duration - cfg.anomaly_stop_prior_window_s,
+            t - duration)
+        if prior_v is None or prior_v < cfg.anomaly_stop_min_prior_speed:
+            continue
         p = history.latest(tid)
         if p and _in_any_zone((p.cx, p.cy), stop_zones):
             continue  # legitimate stop (intersection/bus stop) — suppress
         ml_speed = history.get_ml_speed(tid)
-        meta = {"duration": duration, "cx": p.cx, "cy": p.cy}
+        meta = {"duration": duration, "prior_v": prior_v, "cx": p.cx, "cy": p.cy}
         if ml_speed:
             meta["ml_speed_mps"] = ml_speed.speed_mps
             meta["ml_speed_kmph"] = ml_speed.speed_kmph
@@ -253,6 +323,7 @@ def run_all_heuristics(history: TrackHistory, t: float, cfg: HeuristicConfig, st
     triggers = []
     triggers += check_speed_drop(history, t, cfg, stop_zones=stop_zones)
     triggers += check_collision(history, t, cfg)
+    triggers += check_jerk(history, t, cfg)
     triggers += check_anomaly_stop(history, t, cfg, stop_zones=stop_zones)
     triggers += check_hit_and_run(history, t, cfg)
     return triggers

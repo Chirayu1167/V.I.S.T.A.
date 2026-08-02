@@ -26,6 +26,8 @@ from .verification import ConfirmedEvent
 SEVERITY_BY_KIND = {
     "hit_and_run": "high",
     "collision": "high",
+    "jerk": "medium",
+    "smoke": "medium",
     "speed_drop": "medium",
     "anomaly_stop": "low",
 }

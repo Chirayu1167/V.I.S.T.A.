@@ -152,6 +152,11 @@ class MlSpeedEstimator:
         self._kf_state: Dict[int, np.ndarray] = {}   # track_id -> 4-vector
         self._kf_cov: Dict[int, np.ndarray] = {}     # track_id -> 4x4
         self._kf_last_t: Dict[int, float] = {}       # track_id -> last update t
+        # Per-track smoothed speed history (t, m/s) fed by the Kalman filter —
+        # used by deceleration() so jerk reads a clean series instead of the
+        # noisy raw per-sample positions.
+        self._kf_speed_hist: Dict[int, deque] = {}
+        self._kf_speed_maxlen = max(30, int(2.0 * fps * 2))
         # Process noise (velocity random walk, m^2/s^3) and observation noise
         # (position, m^2). Small q => the filter trusts constant motion and
         # cleans up jitter; a real stop shows up as an immediate collapse.
@@ -281,6 +286,8 @@ class MlSpeedEstimator:
             self._kf_state[track_id] = np.array([wx, wy, 0.0, 0.0])
             self._kf_cov[track_id] = np.diag([1.0, 1.0, 25.0, 25.0])
             self._kf_last_t[track_id] = t
+            hist_speed = self._kf_speed_hist.setdefault(track_id, deque(maxlen=self._kf_speed_maxlen))
+            hist_speed.append((t, 0.0))
             return
 
         dt = max(1e-6, t - prev_t)
@@ -311,11 +318,16 @@ class MlSpeedEstimator:
             self._kf_state[track_id] = np.array([wx, wy, 0.0, 0.0])
             self._kf_cov[track_id] = np.diag([1.0, 1.0, 25.0, 25.0])
             self._kf_last_t[track_id] = t
+            hist_speed = self._kf_speed_hist.setdefault(track_id, deque(maxlen=self._kf_speed_maxlen))
+            hist_speed.append((t, 0.0))
             return
         K = P_pred @ H.T @ np.linalg.inv(S)
         self._kf_state[track_id] = x_pred + K @ y
         self._kf_cov[track_id] = (np.eye(4) - K @ H) @ P_pred
         self._kf_last_t[track_id] = t
+        hist_speed = self._kf_speed_hist.setdefault(track_id, deque(maxlen=self._kf_speed_maxlen))
+        hist_speed.append((t, float(np.hypot(self._kf_state[track_id][2],
+                                             self._kf_state[track_id][3]))))
 
     def _kalman_velocity(self, track_id: int) -> Optional[float]:
         """Filtered instantaneous speed (m/s), or None if the filter hasn't
@@ -338,6 +350,7 @@ class MlSpeedEstimator:
             self._kf_state.pop(tid, None)
             self._kf_cov.pop(tid, None)
             self._kf_last_t.pop(tid, None)
+            self._kf_speed_hist.pop(tid, None)
         for tid in list(self.track_speeds.keys()):
             if tid not in current_ids and tid not in self.track_histories and tid not in self.locked_tracks:
                 self.track_speeds.pop(tid, None)
@@ -407,6 +420,29 @@ class MlSpeedEstimator:
             else:
                 break
         return end_t - start_t
+
+    def deceleration(self, track_id: int, window_s: float) -> Optional[float]:
+        """Peak (positive) deceleration in m/s² over the last `window_s`
+        seconds: the largest drop in speed between consecutive samples. A
+        crash into a fixed object produces a huge spike (>>8 m/s²) that
+        windowed averages hide, so this reads the per-sample series. Uses
+        the Kalman-smoothed speed history, not raw positions, so tracker
+        jitter can't fake an impact."""
+        hist = self._kf_speed_hist.get(track_id)
+        if not hist or len(hist) < 3:
+            return None
+        pts = list(hist)
+        cutoff = pts[-1][0] - window_s
+        seg = [p for p in pts if p[0] >= cutoff]
+        if len(seg) < 2:
+            return None
+        decels = []
+        for i in range(1, len(seg)):
+            dt = seg[i][0] - seg[i - 1][0]
+            if dt <= 0:
+                continue
+            decels.append((seg[i - 1][1] - seg[i][1]) / dt)
+        return max(0.0, max(decels)) if decels else None
 
     def draw_speeds(self, frame: np.ndarray, current_tracks=None) -> np.ndarray:
         """Draw speed annotations on frame. Pass the current frame's

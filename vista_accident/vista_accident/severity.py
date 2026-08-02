@@ -35,6 +35,8 @@ class SeverityConfig:
     kind_baseline: Dict[str, float] = field(default_factory=lambda: {
         "hit_and_run": 0.65,
         "collision": 0.55,
+        "jerk": 0.45,
+        "smoke": 0.40,
         "speed_drop": 0.30,
         "anomaly_stop": 0.15,
     })
@@ -68,6 +70,8 @@ class SeverityAssessor:
         fn = {
             "collision": self._score_collision,
             "hit_and_run": self._score_hit_and_run,
+            "jerk": self._score_jerk,
+            "smoke": self._score_smoke,
             "speed_drop": self._score_speed_drop,
             "anomaly_stop": self._score_anomaly_stop,
         }.get(event.kind)
@@ -98,10 +102,11 @@ class SeverityAssessor:
         both_stopped = 1.0 if (v_a < 10.0 and v_b < 10.0) else 0.0
         persons = self._persons_near(event, history)
         person_factor = min(persons / 3.0, 1.0) * 0.15
+        smoke_factor = 0.10 if (event.meta.get("has_smoke") or event.meta.get("smoke_area")) else 0.0
 
         return np.clip(
             0.30 * speed_score + 0.25 * impact_score + 0.15 * both_stopped
-            + 0.15 * person_factor + 0.15,
+            + 0.15 * person_factor + 0.15 + smoke_factor,
             0.0, 1.0,
         )
 
@@ -117,6 +122,40 @@ class SeverityAssessor:
 
         return np.clip(
             0.40 * drop_score + 0.25 * flee_score + 0.10 * person_factor + 0.25,
+            0.0, 1.0,
+        )
+
+    def _score_jerk(self, event: ConfirmedEvent, history: TrackHistory) -> float:
+        meta = event.meta
+        decel = meta.get("decel", 0.0)
+        prior_v = meta.get("prior_v", 0.0)
+
+        # Hard impact = very high deceleration + the vehicle ended near-stopped.
+        decel_score = np.clip((decel - 5.0) / 15.0, 0.0, 1.0)  # 5→20 m/s²
+        speed_score = np.clip(prior_v / self.cfg.high_speed_threshold, 0.0, 1.0)
+        persons = self._persons_near(event, history)
+        person_factor = min(persons / 3.0, 1.0) * 0.10
+        smoke_factor = 0.10 if (meta.get("has_smoke") or meta.get("smoke_area")) else 0.0
+
+        return np.clip(
+            0.40 * decel_score + 0.30 * speed_score + 0.10 * person_factor
+            + 0.10 + smoke_factor,
+            0.0, 1.0,
+        )
+
+    def _score_smoke(self, event: ConfirmedEvent, history: TrackHistory) -> float:
+        meta = event.meta
+        area = meta.get("area", 0.0)
+
+        # Bigger cloud = more violent crash (more debris/dust thrown up).
+        area_score = np.clip(area / 20000.0, 0.0, 1.0)
+        growth = meta.get("growth", 1.0)
+        growth_score = np.clip((growth - 1.0) / 2.0, 0.0, 1.0)
+        persons = self._persons_near(event, history)
+        person_factor = min(persons / 3.0, 1.0) * 0.10
+
+        return np.clip(
+            0.35 * area_score + 0.25 * growth_score + 0.10 * person_factor + 0.20,
             0.0, 1.0,
         )
 

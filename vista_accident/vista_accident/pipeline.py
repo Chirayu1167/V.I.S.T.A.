@@ -21,6 +21,7 @@ from .detector import Detector
 from .fusion import IncidentFuser
 from .heuristics import run_all_heuristics
 from .severity import SeverityAssessor, SeverityConfig
+from .smoke_detector import SmokeDetector
 from .speed_estimator import MlSpeedEstimator, create_speed_estimator_from_config
 from .track_history import TrackHistory
 from .tracker import Tracker
@@ -62,6 +63,7 @@ class AccidentPipeline:
         self.severity = SeverityAssessor(severity_cfg)
         self.secondary = secondary or SecondaryConfirmation(weights_path=None)
         self.dispatcher = AlertDispatcher(self.camera_cfg, self.dispatch_cfg)
+        self.smoke_detector = SmokeDetector(self.cfg)
 
         # Rolling clip buffer for alert packaging ("clip, location, timestamp").
         self._clip_buffer = deque(maxlen=int(clip_buffer_seconds * fps_hint))
@@ -97,6 +99,7 @@ class AccidentPipeline:
 
         raw_triggers = run_all_heuristics(self.history, t, self.cfg,
                                            stop_zones=self.camera_cfg.stop_zones)
+        raw_triggers += self.smoke_detector.process(frame, t)
         confirmed_events = self.fuser.process(
             t, self.verifier.process(t, raw_triggers))
 
