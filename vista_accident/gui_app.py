@@ -295,8 +295,9 @@ class VideoWorker(QThread):
                 annotated = frame.copy()
                 if violence_pipeline is not None:
                     from vista_accident.render import draw_skeletons
-                    violent_ids = {tid for a in result["alerts"] if a.kind == "violence"
-                                   for tid in a.track_ids}
+                    violent_ids = {tid for a in active_alerts
+                                   if a["payload"].kind == "violence"
+                                   for tid in a["payload"].track_ids}
                     draw_skeletons(annotated, result.get("persons", []), violent_ids=violent_ids)
                 if pipeline is not None:
                     draw_overlay(annotated, result["tracks"], pipeline.history,

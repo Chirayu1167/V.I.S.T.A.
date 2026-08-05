@@ -170,7 +170,9 @@ def main():
 
         annotated = frame.copy()
         if violence_pipeline is not None:
-            violent_ids = {tid for a in violence_alerts for tid in a.track_ids}
+            violent_ids = {tid for a in active_alerts
+                           if a["payload"].kind == "violence"
+                           for tid in a["payload"].track_ids}
             draw_skeletons(annotated, violence_pipeline.latest_persons, violent_ids=violent_ids)
         if pipeline is not None:
             draw_overlay(annotated, result["tracks"], pipeline.history,

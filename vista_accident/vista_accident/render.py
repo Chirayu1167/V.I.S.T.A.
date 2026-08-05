@@ -180,14 +180,29 @@ def draw_alert_panel(frame, active_alerts, t, display_seconds=ALERT_DISPLAY_SECO
 
 
 def draw_skeletons(frame, persons, violent_ids=frozenset()):
-    """Draws COCO skeleton lines + joints for each (track_id, bbox, kpts_xy)
-    person; joints with NaN visibility are skipped. Persons in violent_ids
-    (track ids of an active violence alert) get magenta limbs, everyone else
-    gets green."""
-    for tid, _bbox, kpts in persons:
+    """Draws a bbox + id pill per person (accident-style boxes) PLUS COCO
+    skeleton lines/joints for each (track_id, bbox, kpts_xy) person; joints
+    with NaN visibility are skipped. Persons in violent_ids (track ids of an
+    active violence alert) get magenta boxes with a thicker outline, everyone
+    else gets green — mirroring how draw_overlay highlights alerting vehicles.
+    Boxes are drawn even when keypoints are missing (distant CCTV people),
+    so every tracked person is visible."""
+    for tid, bbox, kpts in persons:
+        x1, y1, x2, y2 = (int(v) for v in bbox)
+        is_violent = tid in violent_ids
+        color = COLORS["violence"] if is_violent else COLORS["person"]
+        thickness = 3 if is_violent else 1
+
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
+
+        id_label = f"#{tid}"
+        (tw, th), _ = cv2.getTextSize(id_label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+        cv2.rectangle(frame, (x1, y1 - th - 8), (x1 + tw + 6, y1 - 2), (0, 0, 0), -1)
+        cv2.putText(frame, id_label, (x1 + 3, y1 - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
+
         if kpts is None or len(kpts) < 17:
             continue
-        color = COLORS["violence"] if tid in violent_ids else (120, 220, 120)
         for a, b in SKELETON_PAIRS:
             if (not np.isfinite(kpts[a][0])) or (not np.isfinite(kpts[b][0])):
                 continue
