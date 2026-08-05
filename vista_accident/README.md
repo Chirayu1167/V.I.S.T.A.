@@ -29,6 +29,9 @@ python demo.py --source path/to/video.mp4 --device cpu
 This writes:
 - `out.mp4` — annotated video (track boxes + red ALERT banner on confirmed events)
 - `alerts.jsonl` — the dashboard log; one JSON record per dispatched alert
+- `recipients.json` — nearby hospitals/police stations used by the
+  control-room console for nearest-recipient routing display
+- `acks.jsonl` — operator acknowledgements from the control-room console
 
 ## Validate the logic without a real video
 
@@ -60,7 +63,7 @@ exactly what a signal should and shouldn't fire on.
 | `alert.py` | Severity scoring (no-injury vs injury-flagged), multi-channel mock dispatch (HMAC-signed), burst rate limiting, **async** dashboard logging (background thread, never blocks the alert path — call `.close()`/`pipeline.close()` to flush it on shutdown) |
 | `pipeline.py` | `AccidentPipeline.process_frame()` — wires the above into one call per frame; also owns clip export |
 | `tools/draw_stop_zones.py` | Click-to-draw stop-zone polygons on a real frame from your camera → JSON for `--stop-zones-json` |
-| `tools/dashboard.py` | Stdlib-only live web dashboard over `alerts.jsonl` (works with the merged multi-camera log too) |
+| `tools/dashboard.py` | Control-room console over `alerts.jsonl` + `vista_clips/` — WebAudio siren, severity banner, clip playback, nearest-recipient routing (`recipients.json`), operator ACK (`acks.jsonl`). Stdlib-only. Works with the merged multi-camera log too |
 | `tools/review_alerts.py` | Walk through logged alerts, label true/false positive, get a false-positive-rate-by-kind summary to actually justify threshold changes |
 | `multi_camera.py` | Runs one `AccidentPipeline` per camera concurrently, all alerts merged into one shared log/dashboard |
 
@@ -87,11 +90,19 @@ delayed for it.
 camera and lets you click-draw polygons instead of hand-editing pixel
 coordinates. Feed the result straight into `--stop-zones-json`.
 
-**Live dashboard.** `python -m vista_accident.tools.dashboard --log
-alerts.jsonl` serves a small auto-refreshing web page over the alert log —
-stdlib only, no extra dependency. Works unmodified with the merged log
-from `multi_camera.py` since every `AlertPayload` already carries its own
-`camera_id`.
+**Control-room console.** `python -m vista_accident.tools.dashboard --log
+alerts.jsonl --clips vista_clips` serves a big-screen dispatch console —
+stdlib only, no extra dependency. For every NEW dispatched alert it sounds
+a WebAudio siren (click ARM SIREN first — browsers block autoplay), flashes
+a severity-colored banner (kind / severity / location / coordinates /
+timestamp / camera / plate), auto-plays the per-alert clip once the pipeline
+finishes writing it (~1.5 s after dispatch), shows the nearest
+hospitals/police stations the alert is routed to (from `recipients.json`,
+matched to the severity's channels), and lets the operator ACK each alert
+(`acks.jsonl`). This is the dispatch-side display of the two-interface demo:
+the GUI (`gui_app.py`) detects, the console receives. Works unmodified with
+the merged log from `multi_camera.py` since every `AlertPayload` already
+carries its own `camera_id`.
 
 **Multi-camera.** `python multi_camera.py --config cameras.json --log
 alerts.jsonl` runs one `AccidentPipeline` per camera concurrently (same

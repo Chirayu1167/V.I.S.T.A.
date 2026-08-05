@@ -129,58 +129,12 @@ class AccidentPipeline:
 
         alerts = []
         for event in confirmed_events:
-            # Confirm against the stored impact frame (the moment the crash
-            # was first seen), not the current frame — by confirmation time
-            # the scene has moved on a few frames.
-            impact_frame = self._pick_impact_frame(event)
-            if impact_frame is None:
-                impact_frame = frame
-            secondary_result = self.secondary.confirm(impact_frame)
-            # If secondary confirmation ran and explicitly rejected it, skip dispatch —
-            # otherwise (not run, or confirmed) proceed on heuristic+verification alone.
-            if secondary_result["ran"] and not secondary_result["confirmed"]:
-                self.confirmed_log.append((event, secondary_result, "rejected_by_secondary"))
-                continue
-
-            severity = self.severity.assess(event, self.history)
-
-            # Plate OCR only for hit_and_run — the one event kind where "the
-            # vehicle kept moving" makes identifying it the actual point.
-            if self.plate_reader is not None and self.plate_reader.enabled and event.kind == "hit_and_run":
-                vehicle_bbox = event.meta.get("vehicle_bbox")
-                if vehicle_bbox is None:
-                    # heuristics.py doesn't currently store the raw bbox in
-                    # meta — fall back to the current tracked box for the
-                    # vehicle track id if still visible this frame.
-                    vehicle_tid = event.track_ids[0]
-                    vt = next((tr for tr in tracks if tr[0] == vehicle_tid), None)
-                    vehicle_bbox = vt[1] if vt else None
-                if vehicle_bbox is not None:
-                    crop = PlateReader.crop_bbox(impact_frame, vehicle_bbox)
-                    plate_result = self.plate_reader.read(crop)
-                    if plate_result.get("plate_text"):
-                        event.meta["plate_text"] = plate_result["plate_text"]
-                        event.meta["plate_confidence"] = plate_result["confidence"]
-
-            clip_path = None
-            if self.clip_dir:
-                # Reserve the path now (dispatch isn't delayed for it); the
-                # actual file is written a few frames later once the buffer
-                # has enough post-impact frames — see _process_pending_clips.
-                clip_path = os.path.join(self.clip_dir, f"pending-{self.camera_cfg.camera_id}-{int(event.t)}-{self.frame_count}.mp4")
-
-            payload = self.dispatcher.build_and_dispatch(event, secondary_result, clip_path, severity=severity)
-            alerts.append(payload)
-            self.confirmed_log.append((event, secondary_result, "dispatched"))
-
-            if self.clip_dir:
-                self._pending_clips.append({
-                    "alert_id": payload.alert_id,
-                    "path": clip_path,
-                    "t_impact": event.t,
-                    "due_t": event.t + self.clip_post_seconds,
-                })
-
+            try:
+                dispatched = self._dispatch_event(event, frame, t, tracks)
+                if dispatched is not None:
+                    alerts.append(dispatched)
+            except Exception as e:  # one bad event must never kill the whole feed
+                self.confirmed_log.append((event, {}, f"dispatch_error: {e}"))
         saved_clips = self._process_pending_clips(t)
 
         # Include ML speed estimates in output
@@ -195,6 +149,66 @@ class AccidentPipeline:
             "speeds": speeds,
             "clips_saved": saved_clips,
         }
+
+    def _dispatch_event(self, event, frame: np.ndarray, t: float,
+                        tracks: list) -> Optional[object]:
+        """Dispatch one confirmed event: secondary confirmation against the
+        stored impact frame, severity assessment, optional plate OCR, clip
+        path reservation, then dispatch + pending-clip scheduling. Returns
+        the AlertPayload, or None if secondary confirmation rejected it.
+        Kept separate from process_frame so a failing event can be skipped
+        without killing the whole feed."""
+        # Confirm against the stored impact frame (the moment the crash
+        # was first seen), not the current frame — by confirmation time
+        # the scene has moved on a few frames.
+        impact_frame = self._pick_impact_frame(event)
+        if impact_frame is None:
+            impact_frame = frame
+        secondary_result = self.secondary.confirm(impact_frame)
+        # If secondary confirmation ran and explicitly rejected it, skip dispatch —
+        # otherwise (not run, or confirmed) proceed on heuristic+verification alone.
+        if secondary_result["ran"] and not secondary_result["confirmed"]:
+            self.confirmed_log.append((event, secondary_result, "rejected_by_secondary"))
+            return None
+
+        severity = self.severity.assess(event, self.history)
+
+        # Plate OCR only for hit_and_run — the one event kind where "the
+        # vehicle kept moving" makes identifying it the actual point.
+        if self.plate_reader is not None and self.plate_reader.enabled and event.kind == "hit_and_run":
+            vehicle_bbox = event.meta.get("vehicle_bbox")
+            if vehicle_bbox is None:
+                # heuristics.py doesn't currently store the raw bbox in
+                # meta — fall back to the current tracked box for the
+                # vehicle track id if still visible this frame.
+                vehicle_tid = event.track_ids[0]
+                vt = next((tr for tr in tracks if tr[0] == vehicle_tid), None)
+                vehicle_bbox = vt[1] if vt else None
+            if vehicle_bbox is not None:
+                crop = PlateReader.crop_bbox(impact_frame, vehicle_bbox)
+                plate_result = self.plate_reader.read(crop)
+                if plate_result.get("plate_text"):
+                    event.meta["plate_text"] = plate_result["plate_text"]
+                    event.meta["plate_confidence"] = plate_result["confidence"]
+
+        clip_path = None
+        if self.clip_dir:
+            # Reserve the path now (dispatch isn't delayed for it); the
+            # actual file is written a few frames later once the buffer
+            # has enough post-impact frames — see _process_pending_clips.
+            clip_path = os.path.join(self.clip_dir, f"pending-{self.camera_cfg.camera_id}-{int(event.t)}-{self.frame_count}.mp4")
+
+        payload = self.dispatcher.build_and_dispatch(event, secondary_result, clip_path, severity=severity)
+        self.confirmed_log.append((event, secondary_result, "dispatched"))
+
+        if self.clip_dir:
+            self._pending_clips.append({
+                "alert_id": payload.alert_id,
+                "path": clip_path,
+                "t_impact": event.t,
+                "due_t": event.t + self.clip_post_seconds,
+            })
+        return payload
 
     def _process_pending_clips(self, t: float) -> list:
         """Writes out any pending clip whose post-impact window has now

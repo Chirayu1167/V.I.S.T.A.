@@ -1,0 +1,8 @@
+[
+  {"role": "hospital", "name": "Bombay Hospital Indore", "lat": 22.7261, "lon": 75.8710},
+  {"role": "hospital", "name": "Choithram Hospital Indore", "lat": 22.6975, "lon": 75.8666},
+  {"role": "hospital", "name": "Aurobindo Hospital Indore", "lat": 22.7399, "lon": 75.8803},
+  {"role": "police", "name": "Sanyogitaganj Police Station", "lat": 22.7216, "lon": 75.8626},
+  {"role": "police", "name": "Pardeshipura Police Station", "lat": 22.7132, "lon": 75.8731},
+  {"role": "control", "name": "Indore Police Control Room", "lat": 22.7185, "lon": 75.8693}
+]

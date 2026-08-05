@@ -23,6 +23,7 @@ Requires (in addition to requirements.txt): PyQt5
 """
 
 import os
+import subprocess
 import sys
 import time
 from collections import deque
@@ -35,7 +36,7 @@ from PyQt5.QtGui import QImage, QPixmap, QFont, QDesktopServices
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton, QVBoxLayout,
     QHBoxLayout, QFileDialog, QScrollArea, QFrame, QProgressBar, QComboBox,
-    QDoubleSpinBox, QSizePolicy, QDialog, QMessageBox, QGroupBox, QCheckBox,
+    QCheckBox, QDoubleSpinBox, QSizePolicy, QDialog, QMessageBox, QGroupBox,
 )
 
 from vista_accident import AccidentPipeline, CameraConfig, DispatchConfig, HeuristicConfig
@@ -43,8 +44,18 @@ from vista_accident.detector import Detector
 from vista_accident.confirmation import SecondaryConfirmation
 from vista_accident.render import SEVERITY_COLORS, SEVERITY_RANK, SpeedEstimator, draw_overlay
 
-SCREENSHOT_DIR = "vista_screenshots"
-CLIP_DIR = "vista_clips"          # per-alert video clips (pre/post impact), saved when a pipeline runs
+# Absolute base dir of THIS file (not cwd!): the GUI can be launched from
+# anywhere (shortcut, Explorer, terminal) — the alert log, clips, screenshots
+# and the control-room console must all anchor to the same place, otherwise
+# the console watches a different alerts.jsonl than the GUI writes and shows
+# nothing.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ALERTS_LOG = os.path.join(BASE_DIR, "alerts.jsonl")
+SCREENSHOT_DIR = os.path.join(BASE_DIR, "vista_screenshots")
+CLIP_DIR = os.path.join(BASE_DIR, "vista_clips")  # per-alert clips (pre/post impact)
+RECIPIENTS_PATH = os.path.join(BASE_DIR, "recipients.json")
+ACKS_PATH = os.path.join(BASE_DIR, "acks.jsonl")
+CONTROL_ROOM_URL = "http://localhost:8787"
 ALERT_PANEL_WIDTH = 400
 BEFORE_OFFSET_S = 0.6   # how far back the "before" shot is grabbed from
 AFTER_DELAY_S = 0.8     # how long after the alert the "after" shot is grabbed
@@ -193,7 +204,7 @@ class VideoWorker(QThread):
                     detector=Detector(device=self.device),
                     heuristic_cfg=HeuristicConfig(),
                     camera_cfg=CameraConfig(camera_id=self.camera_id, location_name=self.location),
-                    dispatch_cfg=DispatchConfig(dashboard_log_path="alerts.jsonl"),
+                    dispatch_cfg=DispatchConfig(dashboard_log_path=ALERTS_LOG),
                     secondary=SecondaryConfirmation(weights_path=None, device=self.device),
                     fps_hint=fps,
                     clip_dir=self.clip_dir,
@@ -205,7 +216,7 @@ class VideoWorker(QThread):
                 from vista_accident.violence_pipeline import ViolencePipeline
                 violence_pipeline = ViolencePipeline(
                     camera_cfg=CameraConfig(camera_id=self.camera_id, location_name=self.location),
-                    dispatch_cfg=DispatchConfig(dashboard_log_path="alerts.jsonl"),
+                    dispatch_cfg=DispatchConfig(dashboard_log_path=ALERTS_LOG),
                     device=self.device,
                     fps_hint=fps,
                     clip_dir=self.clip_dir,
@@ -472,6 +483,7 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.alert_cards = {}
         self.alert_count = 0
+        self.control_proc = None
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -500,10 +512,17 @@ class MainWindow(QMainWindow):
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.clicked.connect(self.on_stop)
         self.stop_btn.setEnabled(False)
+        self.control_room_btn = QPushButton("Open Control Room")
+        self.control_room_btn.setToolTip(
+            "Start the control-room console (siren + clip playback + routed "
+            "recipients) in a browser — it watches alerts.jsonl and vista_clips/"
+        )
+        self.control_room_btn.clicked.connect(self.on_open_control_room)
 
         controls.addWidget(self.upload_btn)
         controls.addWidget(self.pause_btn)
         controls.addWidget(self.stop_btn)
+        controls.addWidget(self.control_room_btn)
         controls.addStretch(1)
 
         controls.addWidget(QLabel("Device"))
@@ -656,6 +675,37 @@ class MainWindow(QMainWindow):
         paused = self.worker.toggle_pause()
         self.pause_btn.setText("Resume" if paused else "Pause")
 
+    def on_open_control_room(self):
+        """Launch the control-room console server (if not already running)
+        and open it in the default browser. The console is a separate process
+        that watches the SAME absolute alerts.jsonl + vista_clips/ this GUI
+        writes to — the two-interface demo flow (this GUI detects, the
+        console displays with siren/clip). The console is spawned detached
+        with an explicit cwd so it works no matter where the GUI itself was
+        launched from, and it outlives this window."""
+        if not self._control_room_running():
+            flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+            self.control_proc = subprocess.Popen(
+                [sys.executable, "-m", "vista_accident.tools.dashboard",
+                 "--log", ALERTS_LOG, "--clips", CLIP_DIR,
+                 "--recipients", RECIPIENTS_PATH, "--acks", ACKS_PATH],
+                cwd=BASE_DIR,
+                creationflags=flags,
+            )
+        QDesktopServices.openUrl(QUrl(CONTROL_ROOM_URL))
+
+    @staticmethod
+    def _control_room_running():
+        """True if something already listens on the console port — a stale
+        server started earlier would otherwise steal the port and a second
+        spawn would die silently, leaving the browser on the wrong instance."""
+        import socket
+        try:
+            with socket.create_connection(("127.0.0.1", 8787), timeout=0.5):
+                return True
+        except OSError:
+            return False
+
     def on_stop(self):
         if self.worker:
             self.worker.stop()
@@ -714,6 +764,9 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait()
+        # NOTE: the control-room console is deliberately left running — it's
+        # an independent display (big-screen demo), and the port-busy check
+        # in on_open_control_room prevents duplicate servers.
         event.accept()
 
 
