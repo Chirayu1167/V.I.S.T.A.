@@ -135,8 +135,17 @@ class PoseHistory:
 
 def check_violence(history: PoseHistory, t: float, cfg: ViolenceConfig,
                    person_count: Optional[int] = None) -> List[RawTrigger]:
-    """One signal: a person pair that is close together AND shows aggressive
-    limb motion. Returns RawTrigger(kind='violence') per violating pair.
+    """One signal: a person pair that is close together AND shows either
+    aggressive limb motion or a sustained strong box overlap (entanglement).
+    Returns RawTrigger(kind='violence') per violating pair.
+
+    Two evidence paths, OR'ed:
+      - "limb": wrist/elbow motion above threshold (works when keypoints are
+        usable — sparse-scene punches).
+      - "overlap": bbox IoU >= pair_overlap_min_iou sustained >=
+        pair_overlap_min_duration_s, with NO limb speed required. Distant
+        CCTV fights have small people whose keypoints are NaN/unreliable,
+        but grappling boxes stay strongly overlapped.
 
     person_count: concurrent people in the CURRENT frame. Geometry-only limb
     motion cannot separate a walker's arm gesture from a punch (both are
@@ -170,10 +179,12 @@ def check_violence(history: PoseHistory, t: float, cfg: ViolenceConfig,
             speed_b = history.limb_speed(id_b, cfg.limb_window_s, cfg.limb_keypoints,
                                          cfg.limb_min_sample_gap_s)
             available = [s for s in (speed_a, speed_b) if s is not None]
-            if not available:
-                continue
-            limb_speed = max(available)  # catches one-sided assaults too
-            if limb_speed < cfg.limb_speed_threshold_px_s:
+            limb_speed = max(available) if available else None
+
+            use_limb = limb_speed is not None and limb_speed >= cfg.limb_speed_threshold_px_s
+            use_overlap = (iou >= cfg.pair_overlap_min_iou
+                           and duration >= cfg.pair_overlap_min_duration_s)
+            if not use_limb and not use_overlap:
                 continue
 
             cx, cy = (ca[0] + cb[0]) / 2.0, (ca[1] + cb[1]) / 2.0
@@ -187,6 +198,7 @@ def check_violence(history: PoseHistory, t: float, cfg: ViolenceConfig,
                     "iou": iou,
                     "duration_s": duration,
                     "cx": cx, "cy": cy,
+                    "signal": "limb" if use_limb else "overlap",
                 },
             ))
     return triggers

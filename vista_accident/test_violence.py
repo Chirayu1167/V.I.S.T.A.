@@ -9,6 +9,9 @@ so the exact production chain is exercised:
                          -> "violence" alert dispatched, police_control_room routed
   Scenario 2 (far pair): two people 250px apart, static arms -> NO alert
   Scenario 3 (solo):     one person, waving -> NO alert (nobody to fight)
+  Scenario 4 (grapple):  DISTANT CCTV — two small boxes 0.5+ IoU for >0.8s,
+                         keypoints all NaN (unmeasurable limbs) -> alert via
+                         the box-overlap entanglement signal
 
 Run:  & "C:\\Users\\User\\AppData\\Local\\Python\\pythoncore-3.10-64\\python.exe" test_violence.py
 (or: python test_violence.py)
@@ -40,11 +43,14 @@ BODY = [             # plausible COCO-17 keypoint x,y offsets from bbox top-left
 ]
 
 
-def make_person(x, y, w, h, t, arm_freq=0.0, arm_amp=0.0):
+def make_person(x, y, w, h, t, arm_freq=0.0, arm_amp=0.0, no_kpts=False):
     """One fake person: (bbox, conf, kpts(17,2)). Wrists (9,10) oscillate
-    horizontally at arm_freq Hz with arm_amp px when arm_freq > 0."""
+    horizontally at arm_freq Hz with arm_amp px when arm_freq > 0.
+    no_kpts=True -> all keypoints NaN (distant CCTV: pose unmeasurable)."""
     bbox = (float(x), float(y), float(x + w), float(y + h))
     kpts = np.full((17, 2), np.nan, dtype=np.float32)
+    if no_kpts:
+        return (bbox, 0.95, kpts)
     for k, (ox, oy) in enumerate(BODY):
         kx, ky = x + ox, y + oy
         if k in (9, 10) and arm_freq > 0:
@@ -108,6 +114,15 @@ def solo_scene(t):
     return [make_person(260, 110, 80, 180, t, arm_freq=2.0, arm_amp=40.0)]
 
 
+def grapple_scene(t):
+    """Distant CCTV fight: two SMALL boxes (50x80) heavily overlapped
+    (IoU ~0.5), ALL keypoints NaN so limb motion is unmeasurable. Must be
+    caught by the box-overlap entanglement signal."""
+    p1 = make_person(270, 120, 50, 80, t, no_kpts=True)
+    p2 = make_person(285, 122, 50, 80, t, no_kpts=True)
+    return [p1, p2]
+
+
 def main():
     passed = True
 
@@ -131,6 +146,11 @@ def main():
     ok3 = len(solo_alerts) == 0
     print(f"  solo -> {'PASS' if ok3 else 'FAIL'} (alerts={len(solo_alerts)})")
     passed &= ok3
+
+    grapple_alerts = run_scenario(grapple_scene, label="grapple-overlap")
+    ok4 = len(grapple_alerts) >= 1 and all(a.kind == "violence" for a in grapple_alerts)
+    print(f"  grapple-overlap -> {'PASS' if ok4 else 'FAIL'} (alerts={len(grapple_alerts)})")
+    passed &= ok4
 
     print(f"\n{'ALL TESTS PASSED' if passed else 'SOME TESTS FAILED'}")
     return 0 if passed else 1

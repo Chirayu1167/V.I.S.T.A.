@@ -112,7 +112,7 @@ class VideoWorker(QThread):
     def __init__(self, source_path, device="cpu", px_per_meter=None,
                  alert_display_seconds=4.0, min_severity="low",
                  camera_id="CAM-01", location="Uploaded Video",
-                 clip_dir=CLIP_DIR, enable_violence=False, parent=None):
+                 clip_dir=CLIP_DIR, run_accident=True, run_violence=False, parent=None):
         super().__init__(parent)
         self.source_path = source_path
         self.device = device
@@ -122,7 +122,8 @@ class VideoWorker(QThread):
         self.camera_id = camera_id
         self.location = location
         self.clip_dir = clip_dir
-        self.enable_violence = enable_violence
+        self.run_accident = run_accident
+        self.run_violence = run_violence
         self._stop = False
         self._pause = False
 
@@ -186,19 +187,21 @@ class VideoWorker(QThread):
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
             frame_interval = 1.0 / fps
 
-            pipeline = AccidentPipeline(
-                detector=Detector(device=self.device),
-                heuristic_cfg=HeuristicConfig(),
-                camera_cfg=CameraConfig(camera_id=self.camera_id, location_name=self.location),
-                dispatch_cfg=DispatchConfig(dashboard_log_path="alerts.jsonl"),
-                secondary=SecondaryConfirmation(weights_path=None, device=self.device),
-                fps_hint=fps,
-                clip_dir=self.clip_dir,
-            )
+            pipeline = None
+            if self.run_accident:
+                pipeline = AccidentPipeline(
+                    detector=Detector(device=self.device),
+                    heuristic_cfg=HeuristicConfig(),
+                    camera_cfg=CameraConfig(camera_id=self.camera_id, location_name=self.location),
+                    dispatch_cfg=DispatchConfig(dashboard_log_path="alerts.jsonl"),
+                    secondary=SecondaryConfirmation(weights_path=None, device=self.device),
+                    fps_hint=fps,
+                    clip_dir=self.clip_dir,
+                )
             speed_estimator = SpeedEstimator(manual_px_per_meter=self.px_per_meter)
 
             violence_pipeline = None
-            if self.enable_violence:
+            if self.run_violence:
                 from vista_accident.violence_pipeline import ViolencePipeline
                 violence_pipeline = ViolencePipeline(
                     camera_cfg=CameraConfig(camera_id=self.camera_id, location_name=self.location),
@@ -233,7 +236,9 @@ class VideoWorker(QThread):
                 raw_copy = frame.copy()
                 raw_buffer.append((t, raw_copy))
 
-                result = pipeline.process_frame(frame, t)
+                result = {"tracks": [], "alerts": [], "clips_saved": []}
+                if pipeline is not None:
+                    result = pipeline.process_frame(frame, t)
                 if violence_pipeline is not None:
                     vres = violence_pipeline.process_frame(frame, t)
                     result = {
@@ -293,9 +298,10 @@ class VideoWorker(QThread):
                     violent_ids = {tid for a in result["alerts"] if a.kind == "violence"
                                    for tid in a.track_ids}
                     draw_skeletons(annotated, result.get("persons", []), violent_ids=violent_ids)
-                draw_overlay(annotated, result["tracks"], pipeline.history,
-                             active_alerts, t, speed_estimator,
-                             show_alert_panel=False)  # side panel covers this
+                if pipeline is not None:
+                    draw_overlay(annotated, result["tracks"], pipeline.history,
+                                 active_alerts, t, speed_estimator,
+                                 show_alert_panel=False)  # side panel covers this
                 self.frame_ready.emit(annotated)
                 self.progress.emit(frame_idx, total_frames)
 
@@ -309,12 +315,16 @@ class VideoWorker(QThread):
                     self.msleep(int(remaining * 1000))
 
             cap.release()
-            pipeline.close()  # flush any alerts still queued for the async log writer
+            if pipeline is not None:
+                pipeline.close()  # flush any alerts still queued for the async log writer
             if violence_pipeline:
                 violence_pipeline.close()
 
-            n_alerts = len(pipeline.confirmed_log)
-            n_dispatched = sum(1 for _, _, status in pipeline.confirmed_log if status == "dispatched")
+            n_alerts = n_dispatched = 0
+            if pipeline is not None:
+                n_alerts = len(pipeline.confirmed_log)
+                n_dispatched = sum(1 for _, _, status in pipeline.confirmed_log
+                                   if status == "dispatched")
             n_violence = 0
             if violence_pipeline:
                 n_violence = sum(1 for _, _, status in violence_pipeline.confirmed_log
@@ -500,11 +510,21 @@ class MainWindow(QMainWindow):
         self.device_combo.addItems(["cpu", "cuda"])
         controls.addWidget(self.device_combo)
 
+        self.accident_check = QCheckBox("Accident detection (yolo11m)")
+        self.accident_check.setChecked(True)
+        self.accident_check.setToolTip(
+            "Detect collisions/accidents with the yolo11m vehicle branch. "
+            "Runs EVERY frame (the heavy model). Untick it and run the "
+            "violence branch alone for a smooth, faster violence-only test."
+        )
+        controls.addWidget(self.accident_check)
+
         self.violence_check = QCheckBox("Violence detection (pose)")
         self.violence_check.setToolTip(
             "Also run the pose-based violence/road-rage branch (yolo11n-pose, "
             "auto-downloaded on first run): close persons + aggressive limb "
-            "motion route alerts to the police control room."
+            "motion (or sustained box overlap for distant CCTV fights) route "
+            "alerts to the police control room."
         )
         controls.addWidget(self.violence_check)
 
@@ -587,6 +607,12 @@ class MainWindow(QMainWindow):
         self.start_analysis(path)
 
     def start_analysis(self, path):
+        if not (self.accident_check.isChecked() or self.violence_check.isChecked()):
+            QMessageBox.warning(
+                self, "Nothing selected",
+                "Tick at least one detection branch (accident and/or violence) "
+                "before uploading — nothing would be analyzed otherwise.")
+            return
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait()
@@ -605,7 +631,8 @@ class MainWindow(QMainWindow):
             device=self.device_combo.currentText(),
             px_per_meter=px_per_meter,
             min_severity=self.severity_combo.currentText(),
-            enable_violence=self.violence_check.isChecked(),
+            run_accident=self.accident_check.isChecked(),
+            run_violence=self.violence_check.isChecked(),
         )
         self.worker.frame_ready.connect(self.on_frame)
         self.worker.alert_ready.connect(self.on_alert)

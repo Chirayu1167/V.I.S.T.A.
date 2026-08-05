@@ -168,6 +168,17 @@ class ViolenceConfig:
                                             # stay low; the pair_max_persons gate is what keeps
                                             # crowds out, not the speed threshold.
 
+    # --- entangled-pair (bbox overlap) signal ---
+    # Distant CCTV fights: people are SMALL, keypoints are unreliable/NaN,
+    # but a fight means two boxes that overlap strongly and STAY overlapped
+    # (grappling/struggling). This signal fires with NO limb speed at all —
+    # exactly the far-angle case the motion gate misses. The crowd gate
+    # (pair_max_persons) still applies. Fire-or-not fires on BOTH signals
+    # (limb OR overlap); overlap adds no false positives on the clips since
+    # walkers never sustain 0.45+ IoU for 0.8s.
+    pair_overlap_min_iou: float = 0.45       # sustained strong bbox overlap
+    pair_overlap_min_duration_s: float = 0.8 # overlap must persist this long
+
     # --- verification (mirrors HeuristicConfig, kind-scoped) ---
     verify_window_frames: int = 3           # consecutive checks before confirm
     verify_cooldown_s: float = 20.0         # re-alert suppression for the same pair/spot

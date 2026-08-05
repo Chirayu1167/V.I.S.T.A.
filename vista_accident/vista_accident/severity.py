@@ -162,16 +162,24 @@ class SeverityAssessor:
         """Pose-branch severity: how intense the limb motion is, how long the
         confrontation has persisted, and how many people are involved.
         Reads only event.meta (the pose history is a different structure from
-        TrackHistory), so `history` is ignored for this kind."""
+        TrackHistory), so `history` is ignored for this kind.
+        Overlap signals (distant CCTV fights with unusable keypoints) fall
+        back to scaling off the box-overlap depth instead of limb speed."""
         meta = event.meta
         limb_speed = meta.get("limb_speed") or 0.0
         duration = meta.get("duration_s") or 0.0
         involved = len(event.track_ids)
+        iou = meta.get("iou") or 0.0
 
-        # 250 px/s ≈ full-force punches on a ~1280x720 feed.
-        intensity = np.clip(limb_speed / 250.0, 0.0, 1.0)
         duration_score = np.clip((duration - 0.5) / 2.5, 0.0, 1.0)
         people_score = min(involved / 3.0, 1.0) * 0.15
+
+        if meta.get("signal") == "overlap":
+            # Keypoint-free: sustained deep overlap is itself the struggle.
+            intensity = np.clip(iou / 0.7, 0.0, 1.0)
+        else:
+            # 250 px/s ≈ full-force punches on a ~1280x720 feed.
+            intensity = np.clip(limb_speed / 250.0, 0.0, 1.0)
 
         return np.clip(
             0.35 * intensity + 0.25 * duration_score + 0.15 * people_score + 0.25,
