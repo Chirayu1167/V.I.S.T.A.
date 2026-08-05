@@ -29,8 +29,18 @@ from .verification import ConfirmedEvent
 SEVERITY_BY_KIND = {
     "hit_and_run": "high",
     "collision": "high",
+    "violence": "medium",
     "speed_drop": "medium",
     "anomaly_stop": "low",
+}
+
+# Violence/road-rage routing: it's a crime, not a crash — the police control
+# room is the primary responder, EMS joins for severe incidents.
+VIOLENCE_CHANNELS_BY_SEVERITY = {
+    "low": ("traffic_police",),
+    "medium": ("police_control_room", "traffic_police"),
+    "high": ("police_control_room", "traffic_police", "hospital_ems"),
+    "critical": ("police_control_room", "traffic_police", "hospital_ems"),
 }
 
 
@@ -57,9 +67,16 @@ _SHUTDOWN = object()  # sentinel pushed onto the log queue to stop the worker cl
 
 
 class AlertDispatcher:
-    def __init__(self, camera_cfg: CameraConfig, dispatch_cfg: DispatchConfig):
+    def __init__(self, camera_cfg: CameraConfig, dispatch_cfg: DispatchConfig,
+                 channels_map: Optional[dict] = None, alert_prefix: str = ""):
         self.camera_cfg = camera_cfg
         self.dispatch_cfg = dispatch_cfg
+        # Per-branch channel routing (violence routes primarily to police
+        # control room; accident routes via CHANNELS_BY_SEVERITY).
+        self.channels_map = channels_map or CHANNELS_BY_SEVERITY
+        # Branch tag baked into alert ids so the two pipelines' counters
+        # never collide ("CAM-01-42-3" vs "CAM-01-V-42-3").
+        self.alert_prefix = alert_prefix
         self._counter = 0
 
         # Global rate limiting: if this many alerts fire within
@@ -84,7 +101,7 @@ class AlertDispatcher:
         self._counter += 1
         if severity is None:
             severity = SEVERITY_BY_KIND.get(event.kind, "medium")
-        channels = CHANNELS_BY_SEVERITY.get(severity, ("traffic_police",))
+        channels = self.channels_map.get(severity, ("traffic_police",))
 
         bundled = self._check_rate_limit(event.t)
         if bundled:
@@ -96,8 +113,9 @@ class AlertDispatcher:
             channels = ("traffic_police",)
             severity = f"{severity} (bundled)"
 
+        prefix = f"{self.alert_prefix}-" if self.alert_prefix else ""
         payload = AlertPayload(
-            alert_id=f"{self.camera_cfg.camera_id}-{int(event.t)}-{self._counter}",
+            alert_id=f"{self.camera_cfg.camera_id}-{prefix}{int(event.t)}-{self._counter}",
             kind=event.kind,
             severity=severity,
             track_ids=event.track_ids,

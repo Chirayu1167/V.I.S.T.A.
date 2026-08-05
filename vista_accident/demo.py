@@ -31,7 +31,7 @@ from collections import deque
 import cv2
 
 from vista_accident import AccidentPipeline, CameraConfig, DispatchConfig, HeuristicConfig
-from vista_accident.render import ALERT_DISPLAY_SECONDS, SpeedEstimator, draw_overlay
+from vista_accident.render import ALERT_DISPLAY_SECONDS, SpeedEstimator, draw_overlay, draw_skeletons
 
 
 def main():
@@ -62,6 +62,10 @@ def main():
     ap.add_argument("--enable-plate-ocr", action="store_true",
                      help="Run license-plate OCR (requires `pip install easyocr`) on "
                           "hit_and_run alerts and include plate_text in the payload.")
+    ap.add_argument("--violence", action="store_true",
+                     help="Also run the pose-based violence/road-rage branch (yolo11n-pose, "
+                          "auto-downloaded on first run) — pair proximity + limb motion "
+                          "signals route to the police control room.")
     ap.add_argument("--watch-config", default=None,
                      help="Optional JSON file (see vista_accident.config.ConfigWatcher) to "
                           "hot-reload heuristic thresholds / stop_zones from during the run, "
@@ -108,6 +112,18 @@ def main():
         plate_reader=PlateReader() if args.enable_plate_ocr else None,
     )
 
+    violence_pipeline = None
+    if args.violence:
+        from vista_accident.violence_pipeline import ViolencePipeline
+        violence_pipeline = ViolencePipeline(
+            camera_cfg=camera_cfg,
+            dispatch_cfg=DispatchConfig(dashboard_log_path="alerts.jsonl"),
+            device=args.device,
+            fps_hint=fps,
+            clip_dir=args.clip_dir,
+        )
+        print("Violence branch enabled (yolo11n-pose, runs every 3rd frame).")
+
     writer = cv2.VideoWriter(args.output, cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
 
     # Rolling window of alerts still worth showing on screen.
@@ -126,13 +142,28 @@ def main():
         t = frame_idx / fps  # use video-relative timestamps for reproducible demo runs
         result = pipeline.process_frame(frame, t)
 
-        for payload in result["alerts"]:
+        violence_alerts = []
+        if violence_pipeline is not None:
+            vres = violence_pipeline.process_frame(frame, t)
+            violence_alerts = vres["alerts"]
+            for vid, cpath in vres.get("clips_saved", []):
+                print(f"[t={t:.2f}s] VIOLENCE CLIP saved -> {cpath}")
+            for payload in violence_alerts:
+                print(f"[t={t:.2f}s] DISPATCHED {payload.kind} severity={payload.severity} "
+                      f"channels={payload.channels}")
+
+        all_alerts = result["alerts"] + violence_alerts
+        for payload in all_alerts:
             active_alerts.append({"payload": payload, "fired_t": t})
         while active_alerts and (t - active_alerts[0]["fired_t"]) > args.alert_display_seconds:
             active_alerts.popleft()
 
-        annotated = draw_overlay(frame, result["tracks"], pipeline.history,
-                                  list(active_alerts), t, speed_estimator)
+        annotated = frame.copy()
+        if violence_pipeline is not None:
+            violent_ids = {tid for a in violence_alerts for tid in a.track_ids}
+            draw_skeletons(annotated, violence_pipeline.latest_persons, violent_ids=violent_ids)
+        draw_overlay(annotated, result["tracks"], pipeline.history,
+                     list(active_alerts), t, speed_estimator)
         writer.write(annotated)
 
         if result["confirmed_events"]:
@@ -151,6 +182,8 @@ def main():
     if watcher:
         watcher.stop()
     pipeline.close()  # flush any alerts still queued for the async log writer
+    if violence_pipeline:
+        violence_pipeline.close()
 
     elapsed = time.time() - t0
     n_alerts = len(pipeline.confirmed_log)
@@ -158,6 +191,10 @@ def main():
     print(f"\nProcessed {frame_idx} frames in {elapsed:.1f}s "
           f"({frame_idx / elapsed:.1f} fps effective).")
     print(f"Confirmed events: {n_alerts} | Dispatched alerts: {n_dispatched}")
+    if violence_pipeline:
+        n_v = len(violence_pipeline.confirmed_log)
+        n_vd = sum(1 for _, _, status in violence_pipeline.confirmed_log if status == "dispatched")
+        print(f"Violence branch: {n_v} confirmed | {n_vd} dispatched")
     print(f"Annotated video -> {args.output}")
     print(f"Alert log        -> alerts.jsonl")
 

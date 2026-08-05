@@ -35,6 +35,7 @@ class SeverityConfig:
     kind_baseline: Dict[str, float] = field(default_factory=lambda: {
         "hit_and_run": 0.65,
         "collision": 0.55,
+        "violence": 0.55,
         "speed_drop": 0.30,
         "anomaly_stop": 0.15,
     })
@@ -72,6 +73,7 @@ class SeverityAssessor:
         fn = {
             "collision": self._score_collision,
             "hit_and_run": self._score_hit_and_run,
+            "violence": self._score_violence,
             "speed_drop": self._score_speed_drop,
             "anomaly_stop": self._score_anomaly_stop,
         }.get(event.kind)
@@ -91,9 +93,12 @@ class SeverityAssessor:
         # two used to silently push almost every event toward "stopped" /
         # "low speed" regardless of actual severity.
         meta = event.meta
-        iou = meta.get("iou", 0.0)
-        v_a = meta.get("v_a", 0.0) * MPS_TO_KMH
-        v_b = meta.get("v_b", 0.0) * MPS_TO_KMH
+        iou = meta.get("iou", 0.0) or 0.0
+        # `instantaneous_velocity` can be None (Kalman not yet converged on a
+        # freshly-spawned track at impact) — coerce to 0.0 instead of letting
+        # None crash severity assessment and kill the whole GUI run.
+        v_a = (meta.get("v_a") or 0.0) * MPS_TO_KMH
+        v_b = (meta.get("v_b") or 0.0) * MPS_TO_KMH
 
         tid_a, tid_b = event.track_ids[:2]
         prior_a = (history.velocity(tid_a, self.cfg.speed_drop_window_s) or 0.0) * MPS_TO_KMH
@@ -117,8 +122,8 @@ class SeverityAssessor:
 
     def _score_hit_and_run(self, event: ConfirmedEvent, history: TrackHistory) -> float:
         meta = event.meta
-        ped_drop = meta.get("ped_drop", 0.0)
-        vehicle_v = meta.get("vehicle_v", 0.0) * MPS_TO_KMH
+        ped_drop = meta.get("ped_drop") or 0.0
+        vehicle_v = (meta.get("vehicle_v") or 0.0) * MPS_TO_KMH
 
         drop_score = np.clip((ped_drop - 0.5) / 0.5, 0.0, 1.0)
         flee_score = np.clip(vehicle_v / 80.0, 0.0, 1.0)
@@ -132,8 +137,8 @@ class SeverityAssessor:
 
     def _score_speed_drop(self, event: ConfirmedEvent, history: TrackHistory) -> float:
         meta = event.meta
-        prior_v = meta.get("prior_v", 0.0) * MPS_TO_KMH
-        drop_ratio = meta.get("drop_ratio", 0.0)
+        prior_v = (meta.get("prior_v") or 0.0) * MPS_TO_KMH
+        drop_ratio = meta.get("drop_ratio") or 0.0
 
         speed_score = np.clip(prior_v / self.cfg.high_speed_threshold, 0.0, 1.0)
         drop_score = np.clip((drop_ratio - 0.5) / 0.5, 0.0, 1.0)
@@ -146,12 +151,32 @@ class SeverityAssessor:
         )
 
     def _score_anomaly_stop(self, event: ConfirmedEvent, history: TrackHistory) -> float:
-        duration = event.meta.get("duration", 2.0)
+        duration = event.meta.get("duration") or 2.0
         dur_score = np.clip((duration - 2.0) / 10.0, 0.0, 1.0)
         persons = self._persons_near(event, history)
         person_factor = min(persons / 2.0, 1.0) * 0.10
 
         return np.clip(0.40 * dur_score + 0.10 * person_factor + 0.05, 0.0, 1.0)
+
+    def _score_violence(self, event: ConfirmedEvent, history: TrackHistory) -> float:
+        """Pose-branch severity: how intense the limb motion is, how long the
+        confrontation has persisted, and how many people are involved.
+        Reads only event.meta (the pose history is a different structure from
+        TrackHistory), so `history` is ignored for this kind."""
+        meta = event.meta
+        limb_speed = meta.get("limb_speed") or 0.0
+        duration = meta.get("duration_s") or 0.0
+        involved = len(event.track_ids)
+
+        # 250 px/s ≈ full-force punches on a ~1280x720 feed.
+        intensity = np.clip(limb_speed / 250.0, 0.0, 1.0)
+        duration_score = np.clip((duration - 0.5) / 2.5, 0.0, 1.0)
+        people_score = min(involved / 3.0, 1.0) * 0.15
+
+        return np.clip(
+            0.35 * intensity + 0.25 * duration_score + 0.15 * people_score + 0.25,
+            0.0, 1.0,
+        )
 
     # ------------------------------------------------------------------
     # helpers

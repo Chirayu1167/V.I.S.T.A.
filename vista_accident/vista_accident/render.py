@@ -6,13 +6,16 @@ consistent.
 """
 
 import cv2
+import numpy as np
 
 from .config import COCO_BICYCLE, COCO_BUS, COCO_CAR, COCO_MOTORCYCLE, COCO_PERSON, COCO_TRUCK
+from .violence_heuristics import SKELETON_PAIRS
 
 COLORS = {
     "vehicle": (60, 180, 255),
     "person": (80, 220, 120),
     "alert": (40, 40, 255),
+    "violence": (255, 0, 255),
     "speed_text": (255, 255, 255),
     "panel_bg": (20, 20, 20),
 }
@@ -163,7 +166,8 @@ def draw_alert_panel(frame, active_alerts, t, display_seconds=ALERT_DISPLAY_SECO
 
     for a in shown:
         payload = a["payload"]
-        color = SEVERITY_COLORS.get(payload.severity, COLORS["alert"])
+        color = (COLORS["violence"] if payload.kind == "violence"
+                 else SEVERITY_COLORS.get(payload.severity, COLORS["alert"]))
         cv2.rectangle(frame, (10 + pad, y - 12), (10 + pad + 12, y), color, -1)
         label = f"{payload.kind.replace('_', ' ')} [{payload.severity}]  tracks={payload.track_ids}"
         cv2.putText(frame, label, (10 + pad + 18, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
@@ -173,3 +177,25 @@ def draw_alert_panel(frame, active_alerts, t, display_seconds=ALERT_DISPLAY_SECO
     if overflow > 0:
         cv2.putText(frame, f"+ {overflow} more", (10 + pad + 18, y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1, cv2.LINE_AA)
+
+
+def draw_skeletons(frame, persons, violent_ids=frozenset()):
+    """Draws COCO skeleton lines + joints for each (track_id, bbox, kpts_xy)
+    person; joints with NaN visibility are skipped. Persons in violent_ids
+    (track ids of an active violence alert) get magenta limbs, everyone else
+    gets green."""
+    for tid, _bbox, kpts in persons:
+        if kpts is None or len(kpts) < 17:
+            continue
+        color = COLORS["violence"] if tid in violent_ids else (120, 220, 120)
+        for a, b in SKELETON_PAIRS:
+            if (not np.isfinite(kpts[a][0])) or (not np.isfinite(kpts[b][0])):
+                continue
+            pt_a = (int(kpts[a][0]), int(kpts[a][1]))
+            pt_b = (int(kpts[b][0]), int(kpts[b][1]))
+            cv2.line(frame, pt_a, pt_b, color, 2, cv2.LINE_AA)
+        for k in range(17):
+            if np.isfinite(kpts[k][0]):
+                pt = (int(kpts[k][0]), int(kpts[k][1]))
+                cv2.circle(frame, pt, 3, color, -1, cv2.LINE_AA)
+    return frame

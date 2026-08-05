@@ -16,7 +16,7 @@ from typing import List
 
 from .verification import ConfirmedEvent
 
-EVENT_PRIORITY = {"hit_and_run": 5, "collision": 4, "speed_drop": 2, "anomaly_stop": 1}
+EVENT_PRIORITY = {"hit_and_run": 5, "violence": 4, "collision": 4, "speed_drop": 2, "anomaly_stop": 1}
 
 
 class _Incident:

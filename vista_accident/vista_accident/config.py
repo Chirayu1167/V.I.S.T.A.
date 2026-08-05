@@ -109,6 +109,74 @@ class HeuristicConfig:
 
 
 @dataclass
+class ViolenceConfig:
+    """Pose-based violence/road-rage branch (see violence_heuristics.py).
+
+    A fight/assault is detected geometrically: two people close together
+    with high-speed limb (wrist/elbow) motion. Scene-agnostic — no fight
+    classifier weights to train, and it works on unseen CCTV angles because
+    it uses keypoint motion, not appearance. The VideoMAE clip classifier
+    (violence_model/) can be bolted on later as a secondary confirmation.
+
+    Pixel thresholds are tuned for ~1280x720 CCTV-style feeds. This branch
+    runs at reduced cadence (motion prefilter per design: the accident
+    branch needs every frame, the violence branch may skip).
+    """
+
+    # --- pose model ---
+    pose_weights: str = "yolo11n-pose.pt"   # auto-downloaded by ultralytics (~5.5 MB)
+    pose_imgsz: int = 640                   # smaller input = faster inference
+    pose_conf_threshold: float = 0.45
+    pose_cadence_frames: int = 3            # run pose detection every N frames
+
+    # --- person pair gates ---
+    # Both must hold before a pair is even scored:
+    pair_max_distance_px: float = 60.0      # centroid distance gate
+    pair_min_iou: float = 0.20              # bbox overlap gate (fallback for crouched/entangled);
+                                            # raised to 0.35 to stop 1080p crowd bboxes, but that
+                                            # also killed test2.mp4's real grapple (dist 60-92px,
+                                            # IoU 0.17-0.25) — restored to 0.20; the crowd case is
+                                            # handled by pair_max_persons instead
+    pair_min_duration_s: float = 0.5        # pair must co-exist this long before scoring
+    pair_max_stale_s: float = 0.35          # drop pairs whose latest pose sample is older than this
+                                            # (kills ghost pairs from tracks that left the frame but
+                                            # still live in the 2s history buffer; 0.5s still let
+                                            # walkers 7+ checks stale trigger)
+    pair_max_persons: int = 5               # suppress ALL scoring above this many concurrent people.
+                                            # Geometry-only motion cannot separate a walker's arm
+                                            # gesture from a punch (both 150-300 px/s on 1080p); a
+                                            # crowded street ALWAYS produces false pairs. Fights in
+                                            # sparse scenes (<=5 people) are detected reliably; crowd
+                                            # violence is deferred to the VideoMAE secondary
+                                            # confirmation. Ground truth: test4.mp4 (crowd, 6-9 ppl)
+                                            # = 0 alerts, test2/3/fight.mp4 (2-4 ppl) = detected.
+    pair_max_persons_window_s: float = 2.0  # the count gate uses the MAX person count over this
+                                            # recent window, not the instant frame — test4's crowd
+                                            # thinned to 3 people for a moment and slipped a false
+                                            # pair past the instant gate
+
+    # --- limb motion ---
+    # COCO keypoint ids: 5,6 = shoulders; 7,8 = elbows; 9,10 = wrists.
+    limb_keypoints: List[int] = field(default_factory=lambda: [7, 8, 9, 10])
+    limb_window_s: float = 0.4              # window for mean limb-point speed
+    limb_min_sample_gap_s: float = 0.12     # only score point pairs >= this far apart in time;
+                                            # at 60fps pose cadence (every 3rd frame = 0.05s) the
+                                            # frame-to-frame keypoint jitter reads as 20x too much
+                                            # speed (saw 1600 px/s on normal crowds), the gap floors it
+    limb_speed_threshold_px_s: float = 30.0  # mean wrist/elbow speed to count as aggressive motion.
+                                            # test2.mp4's real grapple is only 32 px/s, so this must
+                                            # stay low; the pair_max_persons gate is what keeps
+                                            # crowds out, not the speed threshold.
+
+    # --- verification (mirrors HeuristicConfig, kind-scoped) ---
+    verify_window_frames: int = 3           # consecutive checks before confirm
+    verify_cooldown_s: float = 20.0         # re-alert suppression for the same pair/spot
+
+    # --- severity baseline ---
+    severity_baseline: float = 0.55
+
+
+@dataclass
 class CameraConfig:
     camera_id: str = "CAM-01"
     location_name: str = "MG Road & 2nd Cross Junction"

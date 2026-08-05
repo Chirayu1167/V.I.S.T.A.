@@ -35,7 +35,7 @@ from PyQt5.QtGui import QImage, QPixmap, QFont, QDesktopServices
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton, QVBoxLayout,
     QHBoxLayout, QFileDialog, QScrollArea, QFrame, QProgressBar, QComboBox,
-    QDoubleSpinBox, QSizePolicy, QDialog, QMessageBox, QGroupBox,
+    QDoubleSpinBox, QSizePolicy, QDialog, QMessageBox, QGroupBox, QCheckBox,
 )
 
 from vista_accident import AccidentPipeline, CameraConfig, DispatchConfig, HeuristicConfig
@@ -112,7 +112,7 @@ class VideoWorker(QThread):
     def __init__(self, source_path, device="cpu", px_per_meter=None,
                  alert_display_seconds=4.0, min_severity="low",
                  camera_id="CAM-01", location="Uploaded Video",
-                 clip_dir=CLIP_DIR, parent=None):
+                 clip_dir=CLIP_DIR, enable_violence=False, parent=None):
         super().__init__(parent)
         self.source_path = source_path
         self.device = device
@@ -122,6 +122,7 @@ class VideoWorker(QThread):
         self.camera_id = camera_id
         self.location = location
         self.clip_dir = clip_dir
+        self.enable_violence = enable_violence
         self._stop = False
         self._pause = False
 
@@ -196,6 +197,17 @@ class VideoWorker(QThread):
             )
             speed_estimator = SpeedEstimator(manual_px_per_meter=self.px_per_meter)
 
+            violence_pipeline = None
+            if self.enable_violence:
+                from vista_accident.violence_pipeline import ViolencePipeline
+                violence_pipeline = ViolencePipeline(
+                    camera_cfg=CameraConfig(camera_id=self.camera_id, location_name=self.location),
+                    dispatch_cfg=DispatchConfig(dashboard_log_path="alerts.jsonl"),
+                    device=self.device,
+                    fps_hint=fps,
+                    clip_dir=self.clip_dir,
+                )
+
             # Rolling buffer of raw (unannotated) frames, just deep enough to
             # look back BEFORE_OFFSET_S for the "before" screenshot.
             buf_len = max(2, int(fps * (BEFORE_OFFSET_S + 0.5)))
@@ -222,6 +234,14 @@ class VideoWorker(QThread):
                 raw_buffer.append((t, raw_copy))
 
                 result = pipeline.process_frame(frame, t)
+                if violence_pipeline is not None:
+                    vres = violence_pipeline.process_frame(frame, t)
+                    result = {
+                        **result,
+                        "alerts": result["alerts"] + vres["alerts"],
+                        "clips_saved": result.get("clips_saved", []) + vres.get("clips_saved", []),
+                        "persons": vres.get("persons", []),
+                    }
                 saved_clips = result.get("clips_saved", [])
                 clips_saved += len(saved_clips)
                 for vid, cpath in saved_clips:
@@ -267,9 +287,15 @@ class VideoWorker(QThread):
                     if (t - a["fired_t"]) <= self.alert_display_seconds
                 ]
 
-                annotated = draw_overlay(frame, result["tracks"], pipeline.history,
-                                          active_alerts, t, speed_estimator,
-                                          show_alert_panel=False)  # side panel covers this
+                annotated = frame.copy()
+                if violence_pipeline is not None:
+                    from vista_accident.render import draw_skeletons
+                    violent_ids = {tid for a in result["alerts"] if a.kind == "violence"
+                                   for tid in a.track_ids}
+                    draw_skeletons(annotated, result.get("persons", []), violent_ids=violent_ids)
+                draw_overlay(annotated, result["tracks"], pipeline.history,
+                             active_alerts, t, speed_estimator,
+                             show_alert_panel=False)  # side panel covers this
                 self.frame_ready.emit(annotated)
                 self.progress.emit(frame_idx, total_frames)
 
@@ -284,12 +310,18 @@ class VideoWorker(QThread):
 
             cap.release()
             pipeline.close()  # flush any alerts still queued for the async log writer
+            if violence_pipeline:
+                violence_pipeline.close()
 
             n_alerts = len(pipeline.confirmed_log)
             n_dispatched = sum(1 for _, _, status in pipeline.confirmed_log if status == "dispatched")
+            n_violence = 0
+            if violence_pipeline:
+                n_violence = sum(1 for _, _, status in violence_pipeline.confirmed_log
+                                 if status == "dispatched")
             self.finished_processing.emit({
                 "frames": frame_idx, "confirmed": n_alerts, "dispatched": n_dispatched,
-                "clips_saved": clips_saved,
+                "violence": n_violence, "clips_saved": clips_saved,
             })
         except Exception as e:  # surface errors in the UI instead of a silent thread death
             import traceback
@@ -304,6 +336,11 @@ class VideoWorker(QThread):
                 pipeline.close()
             except NameError:
                 pass  # pipeline wasn't constructed yet (e.g. video failed to open)
+            try:
+                if violence_pipeline:
+                    violence_pipeline.close()
+            except NameError:
+                pass
 
 
 class Thumb(QLabel):
@@ -463,6 +500,14 @@ class MainWindow(QMainWindow):
         self.device_combo.addItems(["cpu", "cuda"])
         controls.addWidget(self.device_combo)
 
+        self.violence_check = QCheckBox("Violence detection (pose)")
+        self.violence_check.setToolTip(
+            "Also run the pose-based violence/road-rage branch (yolo11n-pose, "
+            "auto-downloaded on first run): close persons + aggressive limb "
+            "motion route alerts to the police control room."
+        )
+        controls.addWidget(self.violence_check)
+
         controls.addWidget(QLabel("Min severity"))
         self.severity_combo = QComboBox()
         self.severity_combo.addItems(["low", "medium", "high", "critical"])
@@ -560,6 +605,7 @@ class MainWindow(QMainWindow):
             device=self.device_combo.currentText(),
             px_per_meter=px_per_meter,
             min_severity=self.severity_combo.currentText(),
+            enable_violence=self.violence_check.isChecked(),
         )
         self.worker.frame_ready.connect(self.on_frame)
         self.worker.alert_ready.connect(self.on_alert)
