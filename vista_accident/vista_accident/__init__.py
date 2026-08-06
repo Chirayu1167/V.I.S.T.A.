@@ -5,7 +5,8 @@ from .severity import SeverityAssessor, SeverityConfig
 from .tracker import Tracker
 from .confirmation import SecondaryConfirmation
 from .plate_reader import PlateReader
-from .violence_pipeline import ViolencePipeline
+from .violence_pipeline import ViolencePipeline, PoseDetector
+from .batch_inference import SharedInferenceHub, CameraInferenceClient, BatchCollector
 
 __all__ = [
     "AccidentPipeline",
@@ -16,9 +17,13 @@ __all__ = [
     "DispatchConfig",
     "ConfigWatcher",
     "Detector",
+    "PoseDetector",
     "Tracker",
     "SecondaryConfirmation",
     "SeverityAssessor",
     "SeverityConfig",
     "PlateReader",
+    "SharedInferenceHub",
+    "CameraInferenceClient",
+    "BatchCollector",
 ]

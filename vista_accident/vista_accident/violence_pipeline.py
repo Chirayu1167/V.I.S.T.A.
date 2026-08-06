@@ -53,20 +53,56 @@ class PoseDetector:
 
     def detect(self, frame: np.ndarray) -> List[Tuple[Tuple[float, float, float, float], float, np.ndarray]]:
         """Returns [(bbox_xyxy, confidence, kpts_xy (17,2)), ...]; missing
-        keypoints are NaN so heuristics can skip them."""
+        keypoints are NaN so heuristics can skip them.
+
+        Single-frame path — unchanged output. Internally delegates to
+        detect_batch() with a batch of 1, same pattern as Detector.detect().
+        """
+        return self.detect_batch([frame])[0]
+
+    def detect_batch(
+        self, frames: List[np.ndarray]
+    ) -> List[List[Tuple[Tuple[float, float, float, float], float, np.ndarray]]]:
+        """Batched version of detect() — one forward pass across all given
+        frames. Returns a list aligned 1:1 with `frames`. Only called on
+        cadence frames (ViolencePipeline already gates that), so this fires
+        far less often than the accident detector's batch call.
+
+        A bad frame is isolated the same way as Detector.detect_batch: it
+        gets an empty result rather than failing the whole batch.
+        """
+        out: List[List[Tuple[Tuple[float, float, float, float], float, np.ndarray]]] = [[] for _ in frames]
+        valid_indices: List[int] = []
+        valid_frames: List[np.ndarray] = []
+
+        for i, frame in enumerate(frames):
+            if frame is None:
+                continue
+            valid_frames.append(frame)
+            valid_indices.append(i)
+
+        if not valid_frames:
+            return out
+
         results = self.model.predict(
-            frame,
+            valid_frames,
             device=self.device,
             half=self.half,
             conf=self.cfg.pose_conf_threshold,
             imgsz=self.cfg.pose_imgsz,
             verbose=False,
         )
+
+        for local_i, result in enumerate(results):
+            out[valid_indices[local_i]] = self._parse_result(result)
+
+        return out
+
+    @staticmethod
+    def _parse_result(result) -> List[Tuple[Tuple[float, float, float, float], float, np.ndarray]]:
         out = []
-        if not results:
-            return out
-        boxes = results[0].boxes
-        kps = getattr(results[0], "keypoints", None)
+        boxes = getattr(result, "boxes", None)
+        kps = getattr(result, "keypoints", None)
         if boxes is None or kps is None:
             return out
         data = kps.data.cpu().numpy()  # (N, 17, 3): x, y, conf
@@ -133,18 +169,26 @@ class ViolencePipeline:
     def close(self):
         self.dispatcher.close()
 
-    def process_frame(self, frame: np.ndarray, t: float) -> dict:
+    def process_frame(self, frame: np.ndarray, t: float, persons: Optional[list] = None) -> dict:
         """
         Runs one frame through the violence branch. Returns
         {"tracks": [...], "confirmed_events": [...], "alerts": [...],
          "clips_saved": [...], "persons": [...]}.
+
+        `persons`: optional pre-computed detector.detect() output for this
+        frame. Pass this in when a shared batch_inference worker already ran
+        PoseDetector.detect_batch() across cameras this cycle — it's used
+        as-is and self.detector.detect() is skipped. Leave it None (default)
+        for the original self-contained behavior (single camera / demo.py /
+        gui_app.py), which is unchanged. Only meaningful on cadence frames;
+        ignored otherwise.
         """
         self.frame_count += 1
         self._clip_buffer.append((t, frame.copy()))
 
         alerts = []
         if self.frame_count % self.cfg.pose_cadence_frames == 0:
-            persons = self.detector.detect(frame)
+            persons = persons if persons is not None else self.detector.detect(frame)
             tracked = self.tracker.update([(b, c, 0) for (b, c, _) in persons])
             pose_input = []
             for tid, bbox, _cls in tracked:

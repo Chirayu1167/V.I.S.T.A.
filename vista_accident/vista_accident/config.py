@@ -211,6 +211,19 @@ class CameraConfig:
     # in the homography math (kept for future 3D-geometry-based calibration).
     camera_height_m: float = 8.0
     camera_pitch_deg: float = 45.0
+    # --- Per-camera detection overrides (shared-detector multi-camera mode) ---
+    # When every camera shares ONE Detector/PoseDetector instance (see
+    # batch_inference.py), the model itself can only hold one global
+    # conf_threshold/classes value. These let an individual camera still
+    # tune detection sensitivity — e.g. a low-light or far-field camera
+    # that needs a lower confidence floor than the rest. Applied by
+    # batch_inference.py's fan-out step AFTER the shared batched call
+    # returns, filtering that camera's slice of results only.
+    # Both default to None = "use the shared detector's own defaults",
+    # i.e. today's behavior, unchanged, for any camera that doesn't set them.
+    detection_conf_threshold: Optional[float] = None
+    detection_classes: Optional[List[int]] = None
+
     # homography_src_points: 4+ points in image pixel coords, e.g. corners of
     # a lane, crosswalk, or any rectangle with KNOWN real-world dimensions.
     # Format: [(x1,y1), (x2,y2), (x3,y3), (x4,y4)]

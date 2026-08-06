@@ -108,15 +108,23 @@ class AccidentPipeline:
                 best_d, best = d, bf
         return best
 
-    def process_frame(self, frame: np.ndarray, t: float) -> dict:
+    def process_frame(self, frame: np.ndarray, t: float, detections: Optional[list] = None) -> dict:
         """
         Runs one frame through the full accident branch.
         Returns {"tracks": [...], "confirmed_events": [...], "alerts": [...], "speeds": {...}}
+
+        `detections`: optional pre-computed detector.detect() output for
+        this frame — [(bbox_xyxy, conf, cls), ...]. Pass this in when a
+        shared batch_inference worker already ran Detector.detect_batch()
+        across cameras this cycle (see batch_inference.py); it's used as-is
+        and self.detector.detect() is skipped for this frame. Leave it None
+        (default) for the original self-contained behavior (single camera /
+        demo.py / gui_app.py / test_scenario.py), which is unchanged.
         """
         self.frame_count += 1
         self._clip_buffer.append((t, frame.copy()))
 
-        detections = self.detector.detect(frame)                # (bbox, conf, cls)
+        detections = detections if detections is not None else self.detector.detect(frame)  # (bbox, conf, cls)
         tracks = self.tracker.update(detections)                # (track_id, bbox, cls)
         # Speed estimation reuses these exact tracks (same detector, same
         # track IDs) rather than re-running detection internally.
