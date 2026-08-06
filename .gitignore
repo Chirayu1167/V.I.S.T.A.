@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 
+AGENTS.md
+
 vista_accident/vista_clips/
 vista_accident/vista_screenshots/
 vista_accident/gui_error.log
