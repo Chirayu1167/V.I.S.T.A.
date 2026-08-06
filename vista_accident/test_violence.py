@@ -65,7 +65,7 @@ class ScriptedPoseDetector:
     def __init__(self, persons):
         self.persons = persons
 
-    def detect(self, frame):
+    def detect(self, _frame):
         return list(self.persons)
 
 
@@ -89,7 +89,6 @@ def run_scenario(persons_fn, frames=60, label=""):
         payloads.extend(res["alerts"])
     pipeline.close()
 
-    dispatched = sum(1 for _, _, status in pipeline.confirmed_log if status == "dispatched")
     print(f"[{label}] frames={frames} confirmed={len(pipeline.confirmed_log)} "
           f"dispatched={len(payloads)}")
     return payloads

@@ -22,7 +22,7 @@ class ScriptedDetector(Detector):
         self._frame_idx = 0
         self.script = []  # filled in by build_script()
 
-    def detect(self, frame):
+    def detect(self, _frame):
         boxes = self.script[self._frame_idx] if self._frame_idx < len(self.script) else []
         self._frame_idx += 1
         return boxes  # already in (bbox, conf, cls) form

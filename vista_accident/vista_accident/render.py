@@ -8,7 +8,6 @@ consistent.
 import cv2
 import numpy as np
 
-from .config import COCO_BICYCLE, COCO_BUS, COCO_CAR, COCO_MOTORCYCLE, COCO_PERSON, COCO_TRUCK
 from .violence_heuristics import SKELETON_PAIRS
 
 COLORS = {
@@ -36,37 +35,26 @@ ALERT_DISPLAY_SECONDS = 4.0
 # long enough to smooth out per-frame tracker jitter.
 SPEED_WINDOW_S = 0.4
 
-# Typical real-world object widths (meters), used to auto-estimate a
-# pixels-per-meter scale per object from its own bounding-box width when no
-# manual camera calibration is supplied. This is an approximation (assumes a
-# roughly front/side-on view, flat road, no strong lens distortion) but is
-# far closer to reality than an uncalibrated pixel/second number.
-REAL_WORLD_WIDTH_M = {
-    COCO_CAR: 1.8,
-    COCO_MOTORCYCLE: 0.8,
-    COCO_BUS: 2.5,
-    COCO_TRUCK: 2.5,
-    COCO_PERSON: 0.5,
-    COCO_BICYCLE: 0.6,
-}
-DEFAULT_REAL_WIDTH_M = 1.8
-
 MAX_PLAUSIBLE_KMH = 180.0  # clamp for outlier jitter, not a real physical cap
 
 
 class SpeedEstimator:
     """
-    Converts a track's raw pixel velocity into a smoothed km/h estimate.
+    Converts a track's velocity into a smoothed km/h estimate.
 
-    - If `manual_px_per_meter` is supplied (from real camera calibration),
-      that fixed scale is used for every object — most accurate option.
-    - Otherwise, scale is auto-estimated per object per frame from its own
-      bounding-box width vs. its class's typical real-world width, which
-      self-corrects for distance from the camera (near objects are wider in
-      pixels, matching a wider real box) far better than a single global
-      pixel/second value.
-    - An exponential moving average per track smooths out detector/tracker
-      jitter frame to frame; call reset() when starting a new video.
+    `history.velocity()` (and the instantaneous fallback) ALWAYS return
+    meters/second — the ML estimator path returns homography-based m/s, and
+    the pixel fallback path already multiplies raw px/s by
+    `TrackHistory.meter_per_pixel` — so km/h is a plain x3.6 conversion in
+    every path.
+
+    `manual_px_per_meter` is accepted for API compatibility only and is no
+    longer used for the conversion: the pixel-fallback scale lives in
+    `TrackHistory.meter_per_pixel` (fed from `CameraConfig.meter_per_pixel`,
+    which demo.py --px-per-meter / the GUI px/m field now set directly as
+    1/px_per_m). An exponential moving average per track smooths out
+    detector/tracker jitter frame to frame; call reset() when starting a
+    new video.
     """
 
     def __init__(self, manual_px_per_meter=None, smoothing=0.3):
@@ -77,24 +65,14 @@ class SpeedEstimator:
     def reset(self):
         self._ema.clear()
 
-    def estimate_kmh(self, track_id, cls, bbox, history):
+    def estimate_kmh(self, track_id, history):
         raw_v = history.velocity(track_id, SPEED_WINDOW_S)
         if raw_v is None:
             raw_v = history.instantaneous_velocity(track_id)
         if raw_v is None:
             return self._ema.get(track_id)
 
-        if getattr(history, "speed_estimator", None) is not None:
-            kmh = raw_v * 3.6
-        elif self.manual_px_per_meter:
-            px_per_m = self.manual_px_per_meter
-            kmh = (raw_v / px_per_m) * 3.6
-        else:
-            x1, _, x2, _ = bbox
-            width_px = max(1.0, x2 - x1)
-            real_w_m = REAL_WORLD_WIDTH_M.get(cls, DEFAULT_REAL_WIDTH_M)
-            px_per_m = width_px / real_w_m
-            kmh = (raw_v / px_per_m) * 3.6
+        kmh = raw_v * 3.6
         kmh = max(0.0, min(kmh, MAX_PLAUSIBLE_KMH))
 
         prev = self._ema.get(track_id)
@@ -103,7 +81,7 @@ class SpeedEstimator:
         return smoothed
 
 
-def draw_overlay(frame, tracks, history, active_alerts, t, speed_estimator,
+def draw_overlay(frame, tracks, history, active_alerts, speed_estimator,
                   show_alert_panel=True):
     """
     Draws in-place onto `frame`:
@@ -129,7 +107,7 @@ def draw_overlay(frame, tracks, history, active_alerts, t, speed_estimator,
 
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
 
-        kmh = speed_estimator.estimate_kmh(tid, cls, bbox, history)
+        kmh = speed_estimator.estimate_kmh(tid, history)
         id_label = f"#{tid}" + (f"  {kmh:.0f} km/h" if kmh is not None else "")
         (tw, th), _ = cv2.getTextSize(id_label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
         cv2.rectangle(frame, (x1, y1 - th - 8), (x1 + tw + 6, y1 - 2), (0, 0, 0), -1)
@@ -137,12 +115,11 @@ def draw_overlay(frame, tracks, history, active_alerts, t, speed_estimator,
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
 
     if show_alert_panel:
-        draw_alert_panel(frame, active_alerts, t)
+        draw_alert_panel(frame, active_alerts)
     return frame
 
 
-def draw_alert_panel(frame, active_alerts, t, display_seconds=ALERT_DISPLAY_SECONDS,
-                      max_rows=3):
+def draw_alert_panel(frame, active_alerts, max_rows=3):
     if not active_alerts:
         return
 

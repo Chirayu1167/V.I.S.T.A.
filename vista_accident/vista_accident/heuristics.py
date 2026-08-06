@@ -15,7 +15,6 @@ from typing import List, Tuple
 
 from .config import HeuristicConfig, PERSON_CLASSES, VEHICLE_CLASSES
 from .track_history import TrackHistory
-from .speed_estimator import TrackSpeed
 
 
 @dataclass

@@ -18,7 +18,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import asdict, dataclass, field
-from typing import List, Optional
+from typing import Optional
 
 from .config import CameraConfig, DispatchConfig
 from .severity import CHANNELS_BY_SEVERITY

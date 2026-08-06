@@ -56,6 +56,13 @@ def main():
                           "(each: [[x,y],...]) where vehicles legitimately stop "
                           "(intersections, bus stops) — suppresses speed_drop/anomaly_stop there. "
                           "Draw one with: python -m vista_accident.tools.draw_stop_zones")
+    ap.add_argument("--camera-profile", default=None,
+                     help="Optional camera calibration profile JSON (see camera_profiles/ and "
+                          "tools/calibrate_camera.py): homography points, meter_per_pixel fallback, "
+                          "stop_zones, camera id/location/lat/lon. When given, it replaces the "
+                          "default camera metadata/calibration (explicit --camera-id / --location "
+                          "still override it). Generate one with the GUI calibration flow or "
+                          "tools/calibrate_camera.py.")
     ap.add_argument("--clip-dir", default=None,
                      help="If set, saves a short .mp4 clip (pre/post impact) per dispatched "
                           "alert into this directory instead of just a single impact frame.")
@@ -97,6 +104,25 @@ def main():
     heuristic_cfg = HeuristicConfig()
     camera_cfg = CameraConfig(camera_id=args.camera_id, location_name=args.location,
                                stop_zones=stop_zones)
+    if args.camera_profile:
+        from vista_accident.camera_profile import load_profile
+        camera_cfg = load_profile(args.camera_profile)
+        if args.camera_id != "CAM-01":
+            camera_cfg.camera_id = args.camera_id
+        if args.location != "MG Road & 2nd Cross Junction":
+            camera_cfg.location_name = args.location
+        if stop_zones:
+            camera_cfg.stop_zones = stop_zones
+        print(f"Loaded camera profile {args.camera_profile}: camera={camera_cfg.camera_id} "
+              f"homography_points={len(camera_cfg.homography_src_points)} "
+              f"meter_per_pixel={camera_cfg.meter_per_pixel}")
+
+    # Explicit --px-per-meter overrides the pixel-fallback scale (used only
+    # when no homography is available; the ML estimator ignores it). The
+    # overlay's SpeedEstimator consumes m/s from history, so the manual
+    # scale must land here as CameraConfig.meter_per_pixel.
+    if args.px_per_meter:
+        camera_cfg.meter_per_pixel = 1.0 / args.px_per_meter
 
     watcher = None
     if args.watch_config:
@@ -156,7 +182,7 @@ def main():
         if violence_pipeline is not None:
             vres = violence_pipeline.process_frame(frame, t)
             violence_alerts = vres["alerts"]
-            for vid, cpath in vres.get("clips_saved", []):
+            for _vid, cpath in vres.get("clips_saved", []):
                 print(f"[t={t:.2f}s] VIOLENCE CLIP saved -> {cpath}")
             for payload in violence_alerts:
                 print(f"[t={t:.2f}s] DISPATCHED {payload.kind} severity={payload.severity} "
@@ -176,7 +202,7 @@ def main():
             draw_skeletons(annotated, violence_pipeline.latest_persons, violent_ids=violent_ids)
         if pipeline is not None:
             draw_overlay(annotated, result["tracks"], pipeline.history,
-                         list(active_alerts), t, speed_estimator)
+                         list(active_alerts), speed_estimator)
         writer.write(annotated)
 
         if result["confirmed_events"]:
@@ -212,7 +238,7 @@ def main():
         n_vd = sum(1 for _, _, status in violence_pipeline.confirmed_log if status == "dispatched")
         print(f"Violence branch: {n_v} confirmed | {n_vd} dispatched")
     print(f"Annotated video -> {args.output}")
-    print(f"Alert log        -> alerts.jsonl")
+    print("Alert log        -> alerts.jsonl")
 
 
 if __name__ == "__main__":

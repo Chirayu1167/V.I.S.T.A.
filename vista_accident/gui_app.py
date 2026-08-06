@@ -30,6 +30,7 @@ from collections import deque
 from datetime import datetime
 
 import cv2
+import numpy as np
 
 from PyQt5.QtCore import Qt, QThread, QUrl, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap, QFont, QDesktopServices
@@ -37,12 +38,15 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton, QVBoxLayout,
     QHBoxLayout, QFileDialog, QScrollArea, QFrame, QProgressBar, QComboBox,
     QCheckBox, QDoubleSpinBox, QSizePolicy, QDialog, QMessageBox, QGroupBox,
+    QLineEdit, QSpinBox,
 )
 
 from vista_accident import AccidentPipeline, CameraConfig, DispatchConfig, HeuristicConfig
+from vista_accident.camera_profile import find_profiles, load_profile, save_profile
 from vista_accident.detector import Detector
 from vista_accident.confirmation import SecondaryConfirmation
 from vista_accident.render import SEVERITY_COLORS, SEVERITY_RANK, SpeedEstimator, draw_overlay
+from vista_accident.tools.calibrate_camera import build_homography, render_birdseye_preview
 
 # Absolute base dir of THIS file (not cwd!): the GUI can be launched from
 # anywhere (shortcut, Explorer, terminal) — the alert log, clips, screenshots
@@ -123,7 +127,8 @@ class VideoWorker(QThread):
     def __init__(self, source_path, device="cpu", px_per_meter=None,
                  alert_display_seconds=4.0, min_severity="low",
                  camera_id="CAM-01", location="Uploaded Video",
-                 clip_dir=CLIP_DIR, run_accident=True, run_violence=False, parent=None):
+                 clip_dir=CLIP_DIR, camera_cfg=None, run_accident=True,
+                 run_violence=False, parent=None):
         super().__init__(parent)
         self.source_path = source_path
         self.device = device
@@ -133,6 +138,7 @@ class VideoWorker(QThread):
         self.camera_id = camera_id
         self.location = location
         self.clip_dir = clip_dir
+        self.camera_cfg = camera_cfg
         self.run_accident = run_accident
         self.run_violence = run_violence
         self._stop = False
@@ -165,20 +171,6 @@ class VideoWorker(QThread):
                 break
         return best if best is not None else (buffer[0][1] if buffer else None)
 
-    def _nearest_incident(self, payload):
-        """Find an existing incident this alert belongs to, or None (new card).
-
-        DISABLED: the earlier display merge folded every alert within
-        INCIDENT_MERGE_S into the nearest open incident (with a time-only
-        fallback that ignored distance), so real 2nd/3rd accidents at the
-        same spot a few seconds later were silently eaten — users saw "1st
-        and 3rd crash detected, 2nd and 4th missing". Screenshots/clips of a
-        later crash landed on the earlier crash's card. Every dispatch now
-        creates its OWN card + screenshot set again (the pipeline fuser
-        still collapses sub-event kinds of a single crash).
-        """
-        return None
-
     def _find_clip_owner(self, alert_id):
         """Map a sub-alert's clip file to its incident's primary alert id so
         ALL clips of one crash land on the SAME card's Play button."""
@@ -200,10 +192,18 @@ class VideoWorker(QThread):
 
             pipeline = None
             if self.run_accident:
+                camera_cfg = self.camera_cfg or CameraConfig(
+                    camera_id=self.camera_id, location_name=self.location)
+                # Manual px/m (the "Calibration" field) feeds the pixel-fallback
+                # scale: the overlay's SpeedEstimator consumes m/s from history,
+                # so the manual scale lands here as meter_per_pixel (ignored by
+                # the ML estimator when a homography/profile is present).
+                if self.px_per_meter:
+                    camera_cfg.meter_per_pixel = 1.0 / self.px_per_meter
                 pipeline = AccidentPipeline(
                     detector=Detector(device=self.device),
                     heuristic_cfg=HeuristicConfig(),
-                    camera_cfg=CameraConfig(camera_id=self.camera_id, location_name=self.location),
+                    camera_cfg=camera_cfg,
                     dispatch_cfg=DispatchConfig(dashboard_log_path=ALERTS_LOG),
                     secondary=SecondaryConfirmation(weights_path=None, device=self.device),
                     fps_hint=fps,
@@ -312,7 +312,7 @@ class VideoWorker(QThread):
                     draw_skeletons(annotated, result.get("persons", []), violent_ids=violent_ids)
                 if pipeline is not None:
                     draw_overlay(annotated, result["tracks"], pipeline.history,
-                                 active_alerts, t, speed_estimator,
+                                 active_alerts, speed_estimator,
                                  show_alert_panel=False)  # side panel covers this
                 self.frame_ready.emit(annotated)
                 self.progress.emit(frame_idx, total_frames)
@@ -387,7 +387,7 @@ class Thumb(QLabel):
         else:
             self.setText("…")
 
-    def _open(self, event):
+    def _open(self, _event):
         if not (self._path and os.path.exists(self._path)):
             return
         dlg = QDialog(self)
@@ -475,6 +475,296 @@ class AlertCard(QFrame):
         QDesktopServices.openUrl(QUrl.fromLocalFile(cpath))
 
 
+class CalibrationDialog(QDialog):
+    """
+    GUI homography calibration flow:
+
+        1. Load a frame (from a video file or image) — any frame where you
+           can see 4+ ground-plane reference points (lane edges, crosswalk
+           corners, a measured rectangle).
+        2. Click each reference point on the image; enter its real-world
+           (x, y) in meters and press "Add point". The world frame is any
+           consistent origin/axes on the ground plane (e.g. origin at one
+           corner of a marked lane, x = across the road, y = along it).
+        3. "Compute & preview" builds the homography (reuses the math from
+           tools/calibrate_camera.py) and shows the bird's-eye view — check
+           that known-straight lines look straight there.
+        4. "Save profile" writes a camera profile JSON (homography points,
+           camera id/location, calibration note) that demo.py / the GUI
+           pipeline can load directly.
+
+    A profile's homography is only as good as the reference points: pick
+    points on the ground plane (road surface), spread across the region of
+    the frame where you need accurate speeds, with distances you measured
+    or know (e.g. standard Indian lane width 3.5 m).
+    """
+
+    profile_saved = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Camera Calibration")
+        self.resize(1150, 720)
+        self._frame = None
+        self._points = []     # list of {"px":, "py":, "wx":, "wy":}
+        self._pending = None  # (px, py) of the last image click
+        self._H = None
+        self._build_ui()
+
+    def _build_ui(self):
+        root = QHBoxLayout(self)
+        left = QVBoxLayout()
+        right = QVBoxLayout()
+        root.addLayout(left, 3)
+        root.addLayout(right, 2)
+
+        src_row = QHBoxLayout()
+        self.src_btn = QPushButton("Load Frame (video/image)")
+        self.src_btn.clicked.connect(self.on_load_frame)
+        self.frame_spin = QSpinBox()
+        self.frame_spin.setRange(0, 100000)
+        self.frame_spin.setValue(0)
+        src_row.addWidget(self.src_btn)
+        src_row.addWidget(QLabel("Frame #"))
+        src_row.addWidget(self.frame_spin)
+        src_row.addStretch(1)
+        left.addLayout(src_row)
+
+        self.frame_view = ClickableImage("Click 4+ ground-plane points on the frame")
+        self.frame_view.clicked.connect(self.on_image_click)
+        left.addWidget(self.frame_view, 1)
+
+        self.point_label = QLabel("Points: 0 / 4+ required")
+        self.point_label.setStyleSheet("color: #8a8a90;")
+        left.addWidget(self.point_label)
+
+        hint = QLabel("World coords are in meters; pick any consistent origin/axes "
+                      "(e.g. x = across road, y = along road).")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #6f6f75; font-size: 10.5px;")
+        right.addWidget(hint)
+
+        coord_row = QHBoxLayout()
+        coord_row.addWidget(QLabel("World X (m)"))
+        self.wx_spin = QDoubleSpinBox()
+        self.wx_spin.setRange(-10000.0, 10000.0)
+        self.wx_spin.setDecimals(2)
+        coord_row.addWidget(self.wx_spin)
+        coord_row.addWidget(QLabel("World Y (m)"))
+        self.wy_spin = QDoubleSpinBox()
+        self.wy_spin.setRange(-10000.0, 10000.0)
+        self.wy_spin.setDecimals(2)
+        coord_row.addWidget(self.wy_spin)
+        self.add_btn = QPushButton("Add point")
+        self.add_btn.clicked.connect(self.on_add_point)
+        coord_row.addWidget(self.add_btn)
+        self.undo_btn = QPushButton("Undo")
+        self.undo_btn.clicked.connect(self.on_undo)
+        coord_row.addWidget(self.undo_btn)
+        right.addLayout(coord_row)
+
+        self.compute_btn = QPushButton("Compute homography + preview bird's-eye")
+        self.compute_btn.clicked.connect(self.on_compute)
+        right.addWidget(self.compute_btn)
+
+        self.preview_view = ClickableImage("Bird's-eye preview appears here")
+        self.preview_view.setMinimumSize(400, 260)
+        right.addWidget(self.preview_view, 1)
+
+        meta_box = QGroupBox("Profile metadata")
+        meta = QVBoxLayout(meta_box)
+        meta.addWidget(QLabel("Camera ID"))
+        self.camera_id_edit = QLineEdit("CAM-01")
+        meta.addWidget(self.camera_id_edit)
+        meta.addWidget(QLabel("Location"))
+        self.location_edit = QLineEdit("Unnamed camera")
+        meta.addWidget(self.location_edit)
+        mpp_row = QHBoxLayout()
+        mpp_row.addWidget(QLabel("Fallback px/m (0 = keep config default)"))
+        self.mpp_spin = QDoubleSpinBox()
+        self.mpp_spin.setRange(0.0, 500.0)
+        self.mpp_spin.setDecimals(2)
+        self.mpp_spin.setValue(0.0)
+        mpp_row.addWidget(self.mpp_spin)
+        meta.addLayout(mpp_row)
+        meta.addWidget(QLabel("Calibration note (what did you measure/assume?)"))
+        self.note_edit = QLineEdit("")
+        self.note_edit.setPlaceholderText("e.g. lane width 3.5 m (standard Indian lane) assumed")
+        meta.addWidget(self.note_edit)
+        right.addWidget(meta_box)
+
+        save_row = QHBoxLayout()
+        self.save_btn = QPushButton("Save profile JSON")
+        self.save_btn.clicked.connect(self.on_save)
+        self.use_btn = QPushButton("Use for this session")
+        self.use_btn.setEnabled(False)
+        save_row.addWidget(self.save_btn)
+        save_row.addWidget(self.use_btn)
+        right.addLayout(save_row)
+
+    def on_load_frame(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select a video or image", "",
+            "Video/Image files (*.mp4 *.avi *.mov *.mkv *.jpg *.jpeg *.png);;All files (*)"
+        )
+        if not path:
+            return
+        ext = os.path.splitext(path)[1].lower()
+        if ext in (".jpg", ".jpeg", ".png"):
+            frame = cv2.imread(path)
+        else:
+            cap = cv2.VideoCapture(path)
+            if not cap.isOpened():
+                QMessageBox.critical(self, "Error", f"Could not open: {path}")
+                return
+            cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_spin.value())
+            ok, frame = cap.read()
+            cap.release()
+            if not ok:
+                QMessageBox.critical(self, "Error", f"Could not read frame {self.frame_spin.value()} from {path}")
+                return
+        self._frame = frame
+        self._points = []
+        self._pending = None
+        self._H = None
+        self.use_btn.setEnabled(False)
+        self._refresh_points()
+        self.frame_view.set_frame(frame)
+        self.preview_view.set_frame(np.zeros((180, 320, 3), dtype=np.uint8))
+
+    def on_image_click(self, px, py):
+        self._pending = (px, py)
+        self.frame_view.set_frame(self._draw_points())
+
+    def on_add_point(self):
+        if self._frame is None:
+            return
+        if self._pending is None:
+            QMessageBox.information(self, "No point clicked",
+                                    "Click a point on the frame first, then set its world coords.")
+            return
+        self._points.append({
+            "px": self._pending[0], "py": self._pending[1],
+            "wx": self.wx_spin.value(), "wy": self.wy_spin.value(),
+        })
+        self._pending = None
+        self._H = None
+        self._refresh_points()
+        self.frame_view.set_frame(self._draw_points())
+
+    def on_undo(self):
+        if self._points:
+            self._points.pop()
+            self._H = None
+            self._refresh_points()
+            self.frame_view.set_frame(self._draw_points())
+        else:
+            self._pending = None
+            self.frame_view.set_frame(self._draw_points())
+
+    def on_compute(self):
+        if self._frame is None:
+            return
+        if len(self._points) < 4:
+            QMessageBox.warning(self, "Not enough points",
+                                "Need at least 4 ground-plane points (more is better).")
+            return
+        try:
+            raw = [(p["px"], p["py"], p["wx"], p["wy"]) for p in self._points]
+            H, src, dst = build_homography(raw)
+        except SystemExit as e:
+            QMessageBox.critical(self, "Homography failed", str(e))
+            return
+        self._H = H
+        import tempfile
+        preview_path = os.path.join(tempfile.gettempdir(), "vista_calibration_preview.png")
+        render_birdseye_preview(self._frame, H, preview_path, dst)
+        preview = cv2.imread(preview_path)
+        if preview is not None:
+            self.preview_view.set_frame(preview)
+        self.use_btn.setEnabled(True)
+
+    def on_save(self):
+        if self._frame is None:
+            return
+        if self._H is None:
+            self.on_compute()
+            if self._H is None:
+                return
+        default_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "camera_profiles")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save camera profile", os.path.join(default_dir, "CAM-01.json"),
+            "JSON (*.json)"
+        )
+        if not path:
+            return
+        cfg = CameraConfig(
+            camera_id=self.camera_id_edit.text().strip() or "CAM-01",
+            location_name=self.location_edit.text().strip() or "Unnamed camera",
+            homography_src_points=[[p["px"], p["py"]] for p in self._points],
+            homography_dst_points=[[p["wx"], p["wy"]] for p in self._points],
+        )
+        if self.mpp_spin.value() > 0:
+            cfg.meter_per_pixel = self.mpp_spin.value()
+        note = self.note_edit.text().strip()
+        save_profile(path, cfg, calibration_note=note)
+        self.profile_saved.emit(path)
+        QMessageBox.information(
+            self, "Profile saved",
+            f"Saved to:\n{path}\n\nLoad it with Camera Profile -> Use, or "
+            f"python demo.py --camera-profile {path}"
+        )
+
+    def _draw_points(self):
+        frame = self._frame.copy()
+        for i, p in enumerate(self._points):
+            cv2.circle(frame, (p["px"], p["py"]), 5, (0, 0, 255), -1)
+            cv2.putText(frame, f"#{i+1} ({p['wx']:.2f},{p['wy']:.2f})", (p["px"] + 8, p["py"] - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+        if self._pending is not None:
+            cv2.circle(frame, self._pending, 5, (0, 255, 255), -1)
+        return frame
+
+    def _refresh_points(self):
+        self.point_label.setText(f"Points: {len(self._points)} / 4+ required")
+
+
+class ClickableImage(QLabel):
+    """A QLabel that reports clicks mapped back to original-frame pixel
+    coordinates (compensates for the displayed pixmap's scaling)."""
+
+    clicked = pyqtSignal(int, int)
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._frame_w = None
+        self._scale_x = 1.0
+        self._scale_y = 1.0
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet(
+            "background-color: #0e0e10; color: #6a6a70; border-radius: 6px;"
+        )
+        self.setMinimumSize(400, 260)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setCursor(Qt.CrossCursor)
+
+    def set_frame(self, frame, target_w=None):
+        self._frame_w = frame.shape[1]
+        self._frame_h = frame.shape[0]
+        pix = bgr_to_qpixmap(frame, target_w=target_w or (self.width() or 640))
+        self._scale_x = self._frame_w / max(1.0, pix.width())
+        self._scale_y = self._frame_h / max(1.0, pix.height())
+        self.setPixmap(pix)
+
+    def mousePressEvent(self, event):
+        if self._frame_w is None:
+            return
+        x = int(event.pos().x() * self._scale_x)
+        y = int(event.pos().y() * self._scale_y)
+        if 0 <= x < self._frame_w and 0 <= y < self._frame_h:
+            self.clicked.emit(x, y)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -484,6 +774,8 @@ class MainWindow(QMainWindow):
         self.alert_cards = {}
         self.alert_count = 0
         self.control_proc = None
+        self.camera_cfg = None           # loaded camera profile (None = defaults)
+        self.camera_profile_path = None
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -569,6 +861,23 @@ class MainWindow(QMainWindow):
         )
         controls.addWidget(self.calib_spin)
 
+        controls.addWidget(QLabel("Profile"))
+        self.profile_combo = QComboBox()
+        self.profile_combo.addItem("(default)")
+        self.profile_combo.setToolTip(
+            "Camera calibration profiles in camera_profiles/ (homography + "
+            "stop zones + camera metadata). Pick one to run analysis with "
+            "real-world speeds."
+        )
+        self._refresh_profile_combo()
+        controls.addWidget(self.profile_combo)
+        self.profile_browse_btn = QPushButton("Browse…")
+        self.profile_browse_btn.clicked.connect(self.on_profile_browse)
+        controls.addWidget(self.profile_browse_btn)
+        self.calibrate_btn = QPushButton("Calibrate…")
+        self.calibrate_btn.clicked.connect(self.on_calibrate)
+        controls.addWidget(self.calibrate_btn)
+
         left.addWidget(controls_box)
 
         self.video_label = QLabel("Upload a video to begin analysis.")
@@ -626,6 +935,49 @@ class MainWindow(QMainWindow):
             return
         self.start_analysis(path)
 
+    def _refresh_profile_combo(self):
+        current = self.profile_combo.currentText() if self.profile_combo.count() else "(default)"
+        self.profile_combo.blockSignals(True)
+        self.profile_combo.clear()
+        self.profile_combo.addItem("(default)")
+        for path in find_profiles():
+            self.profile_combo.addItem(os.path.basename(path), path)
+        idx = self.profile_combo.findText(current)
+        self.profile_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.profile_combo.blockSignals(False)
+
+    def on_profile_browse(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select a camera profile", "camera_profiles", "JSON (*.json)"
+        )
+        if not path:
+            return
+        self._use_profile(path)
+
+    def on_calibrate(self):
+        dlg = CalibrationDialog(self)
+        dlg.profile_saved.connect(self._use_profile)
+        dlg.exec()
+
+    def _use_profile(self, path):
+        try:
+            cfg = load_profile(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Profile error", str(e))
+            return
+        self.camera_cfg = cfg
+        self.camera_profile_path = path
+        idx = self.profile_combo.findText(os.path.basename(path))
+        if idx >= 0:
+            self.profile_combo.setCurrentIndex(idx)
+        else:
+            self._refresh_profile_combo()
+        n = len(cfg.homography_src_points)
+        self.status_label.setText(
+            f"Camera profile: {os.path.basename(path)} (camera={cfg.camera_id}, "
+            f"homography points={n})"
+        )
+
     def start_analysis(self, path):
         if not (self.accident_check.isChecked() or self.violence_check.isChecked()):
             QMessageBox.warning(
@@ -653,6 +1005,7 @@ class MainWindow(QMainWindow):
             min_severity=self.severity_combo.currentText(),
             run_accident=self.accident_check.isChecked(),
             run_violence=self.violence_check.isChecked(),
+            camera_cfg=self.camera_cfg,
         )
         self.worker.frame_ready.connect(self.on_frame)
         self.worker.alert_ready.connect(self.on_alert)

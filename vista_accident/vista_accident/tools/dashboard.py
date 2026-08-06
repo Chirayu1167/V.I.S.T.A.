@@ -506,8 +506,8 @@ def main():
     )
     print(f"[control-room] Watching {log_abs} + {clip_abs} at "
           f"http://localhost:{args.port}  (Ctrl+C to stop)")
-    print(f"[control-room] The GUI must write to the SAME alerts.jsonl path "
-          f"shown above, or no alerts will appear here.")
+    print("[control-room] The GUI must write to the SAME alerts.jsonl path "
+          "shown above, or no alerts will appear here.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

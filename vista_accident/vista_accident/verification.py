@@ -10,7 +10,6 @@ A per-event cooldown then prevents the same track/pair from re-firing every
 frame once it's already been alerted.
 """
 
-import time
 from dataclasses import dataclass
 from typing import Dict, List
 

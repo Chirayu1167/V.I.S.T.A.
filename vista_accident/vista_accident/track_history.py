@@ -9,11 +9,18 @@ Now supports optional ML-based speed estimator for real-world speed (m/s, km/h).
 """
 
 from collections import deque, namedtuple
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
 
 from .speed_estimator import MlSpeedEstimator, TrackSpeed
 
 TrackPoint = namedtuple("TrackPoint", ["t", "cx", "cy", "bbox", "cls"])
+
+# How old a track's last-seen timestamp may be for active_ids() to still
+# consider it "active" (see TrackHistory.active_ids). Short enough that a
+# stale bbox is never used for spatial checks (IoU), long enough that a
+# 1-2 frame detection dropout (occlusion, tracker hiccup during an overlap)
+# doesn't starve the collision/hit-and-run pair checks.
+ACTIVE_ID_RECENCY_S = 0.25
 
 
 def _center(bbox):
@@ -49,6 +56,7 @@ class TrackHistory:
         assumed_fps: float = 25.0,
         speed_estimator: Optional[MlSpeedEstimator] = None,
         meter_per_pixel: Optional[float] = None,
+        active_id_recency_s: float = ACTIVE_ID_RECENCY_S,
     ):
         self.history_seconds = history_seconds
         self.assumed_fps = assumed_fps
@@ -59,25 +67,27 @@ class TrackHistory:
         # HeuristicConfig threshold is tuned in. Defaults to CameraConfig's
         # flat scale if not given explicitly.
         self.meter_per_pixel = meter_per_pixel if meter_per_pixel is not None else 0.05
+        self.active_id_recency_s = active_id_recency_s
         # Generous buffer length; actual retention is time-based via prune().
         self._maxlen = max(30, int(history_seconds * assumed_fps * 2))
         self.tracks: Dict[int, deque] = {}
         self.last_seen: Dict[int, float] = {}
-        # Ids seen on the MOST RECENT update() call — what active_ids() uses
-        # by default, so heuristics don't evaluate stale/occluded tracks
-        # against several-frames-old bounding boxes.
+        # Ids seen on the MOST RECENT update() call (informational — the
+        # active_ids() recency window is a superset that tolerates 1-2 frame
+        # detection dropouts).
         self._current_frame_ids: set = set()
+        self._last_update_t: float = 0.0
 
     def update(
         self,
         t: float,
         detections: List[Tuple[int, Tuple[float, float, float, float], int]],
-        frame: Optional[object] = None,  # unused, kept for call-site compatibility
+        _frame: Optional[object] = None,  # unused, kept for call-site compatibility
     ):
         """
         detections: list of (track_id, bbox_xyxy, class_id)
 
-        `frame` is accepted but no longer used: the speed estimator now
+        `_frame` is accepted but no longer used: the speed estimator now
         reuses these same (track_id, bbox, cls) tuples -- the ones produced
         by the pipeline's own Tracker -- instead of re-running detection
         internally. This keeps track IDs consistent between heuristics and
@@ -92,6 +102,7 @@ class TrackHistory:
             seen_ids.add(track_id)
 
         self._current_frame_ids = seen_ids
+        self._last_update_t = t
 
         if self.speed_estimator is not None:
             self.speed_estimator.update(t, detections)
@@ -195,19 +206,28 @@ class TrackHistory:
                 break
         return end_t - start_t
 
-    def active_ids(self, cls_filter=None, include_stale: bool = False) -> List[int]:
+    def active_ids(self, cls_filter=None, include_stale: bool = False,
+                   recency_s: Optional[float] = None) -> List[int]:
         """Track ids to run heuristics against.
 
-        By default this is restricted to ids detected on the MOST RECENT
-        update() call — not everything still sitting in the rolling buffer.
-        A track that briefly drops out of detection (occlusion, a missed
-        frame) stays in `self.tracks` until it's pruned after
-        `history_seconds * 2`, but its latest bbox is stale and shouldn't be
-        used for spatial checks like collision IoU or hit-and-run overlap.
+        By default this is restricted to tracks seen within the last
+        `recency_s` seconds (default `active_id_recency_s`, ~0.25 s), not
+        everything still sitting in the rolling buffer. A track that dropped
+        out of detection for a frame or two (occlusion, tracker hiccup)
+        stays eligible — collision/hit-and-run checks must survive brief
+        dropouts on the overlap frame — but a track unseen for seconds has
+        a stale bbox that shouldn't be used for spatial checks like
+        collision IoU or hit-and-run overlap.
         Pass include_stale=True for callers that intentionally want the
         wider buffer (none currently do, kept for future use/testing).
         """
-        ids = list(self.tracks.keys()) if not include_stale else list(self.tracks.keys())
+        if include_stale:
+            ids = list(self.tracks.keys())
+        else:
+            recency_s = self.active_id_recency_s if recency_s is None else recency_s
+            now = self._last_update_t
+            ids = [tid for tid in self.tracks
+                   if now - self.last_seen.get(tid, 0.0) <= recency_s]
         if cls_filter is None:
             return ids
         out = []

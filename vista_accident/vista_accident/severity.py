@@ -15,7 +15,7 @@ Severity -> channels:
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 
 import numpy as np
 
@@ -158,7 +158,7 @@ class SeverityAssessor:
 
         return np.clip(0.40 * dur_score + 0.10 * person_factor + 0.05, 0.0, 1.0)
 
-    def _score_violence(self, event: ConfirmedEvent, history: TrackHistory) -> float:
+    def _score_violence(self, event: ConfirmedEvent, _history: TrackHistory) -> float:
         """Pose-branch severity: how intense the limb motion is, how long the
         confrontation has persisted, and how many people are involved.
         Reads only event.meta (the pose history is a different structure from

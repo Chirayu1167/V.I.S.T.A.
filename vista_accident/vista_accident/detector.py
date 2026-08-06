@@ -43,7 +43,7 @@ class Detector:
             import torch
             if device == "cuda" and not torch.cuda.is_available():
                 import warnings
-                warnings.warn("CUDA not available. Falling back to CPU (inference will be slower).")
+                warnings.warn("CUDA not available. Falling back to CPU (inference will be slower).", stacklevel=2)
                 self.device = "cpu"
         except ImportError:
             self.device = "cpu"
@@ -59,9 +59,9 @@ class Detector:
         if float(gray.mean()) >= self.low_light_threshold:
             return frame
         lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        l = self._clahe.apply(l)
-        return cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
+        lum, a, b = cv2.split(lab)
+        lum = self._clahe.apply(lum)
+        return cv2.cvtColor(cv2.merge((lum, a, b)), cv2.COLOR_LAB2BGR)
 
     def detect(self, frame: np.ndarray) -> List[Tuple[Tuple[float, float, float, float], float, int]]:
         """Returns list of (bbox_xyxy, confidence, class_id).

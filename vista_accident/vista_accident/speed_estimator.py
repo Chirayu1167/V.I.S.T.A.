@@ -203,7 +203,7 @@ class MlSpeedEstimator:
             hist = self.track_histories.setdefault(track_id, deque(maxlen=self._maxlen))
             hist.append((t, wx, wy, bbox, cls))
 
-            self._kalman_update(track_id, t, wx, wy, bbox)
+            self._kalman_update(track_id, t, wx, wy)
 
             if len(hist) >= self.min_history:
                 self._compute_speed(track_id, window_s=self.history_seconds)
@@ -269,7 +269,7 @@ class MlSpeedEstimator:
             self.locked_tracks.add(track_id)
             self.track_histories.pop(track_id, None)
 
-    def _kalman_update(self, track_id: int, t: float, wx: float, wy: float, bbox) -> None:
+    def _kalman_update(self, track_id: int, t: float, wx: float, wy: float) -> None:
         """Predict-update a per-track constant-velocity Kalman filter with the
         observed ground-point (wx, wy). The filtered velocity becomes the
         stable reading used by instantaneous_velocity()."""
@@ -415,7 +415,7 @@ class MlSpeedEstimator:
         annotated = frame.copy()
         boxes_by_id = {}
         if current_tracks:
-            for tid, bbox, cls in current_tracks:
+            for tid, bbox, _cls in current_tracks:
                 boxes_by_id[tid] = bbox
         for track_id, speed in self.track_speeds.items():
             bbox = boxes_by_id.get(track_id)

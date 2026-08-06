@@ -24,7 +24,7 @@ from .fusion import IncidentFuser
 from .heuristics import run_all_heuristics
 from .plate_reader import PlateReader
 from .severity import SeverityAssessor, SeverityConfig
-from .speed_estimator import MlSpeedEstimator, create_speed_estimator_from_config
+from .speed_estimator import create_speed_estimator_from_config
 from .track_history import TrackHistory
 from .tracker import Tracker
 from .verification import Verifier
@@ -158,7 +158,7 @@ class AccidentPipeline:
             "clips_saved": saved_clips,
         }
 
-    def _dispatch_event(self, event, frame: np.ndarray, t: float,
+    def _dispatch_event(self, event, frame: np.ndarray, _t: float,
                         tracks: list) -> Optional[object]:
         """Dispatch one confirmed event: secondary confirmation against the
         stored impact frame, severity assessment, optional plate OCR, clip

@@ -17,6 +17,7 @@ COCO 17-keypoint order (yolo11n-pose):
 """
 
 from collections import deque, namedtuple
+from itertools import pairwise
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -115,7 +116,7 @@ class PoseHistory:
         if len(recent) < 2:
             recent = list(buf)[-2:]  # fall back to the last pair
         pair_speeds = []
-        for pa, pb in zip(recent, recent[1:]):
+        for pa, pb in pairwise(recent):
             dt = pb.t - pa.t
             if dt < min_sample_gap_s:
                 continue  # too close in time — pure keypoint jitter

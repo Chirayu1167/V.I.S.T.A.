@@ -49,7 +49,6 @@ Either mode prints:
 
 import argparse
 import json
-import sys
 
 import cv2
 import numpy as np
@@ -73,8 +72,7 @@ def collect_points_interactive(frame) -> list:
     display = frame.copy()
     window = "Calibration - click ground-plane points, 'q' to finish (min 4)"
 
-    def on_click(event, x, y, flags, param):
-        nonlocal display
+    def on_click(event, x, y, _flags, _param):
         if event == cv2.EVENT_LBUTTONDOWN:
             print(f"\nClicked pixel ({x}, {y}). Enter its real-world coords in meters.")
             try:
@@ -91,7 +89,7 @@ def collect_points_interactive(frame) -> list:
 
     cv2.imshow(window, display)
     cv2.setMouseCallback(window, on_click)
-    print(f"Click 4+ ground-plane reference points in the window, then press 'q'.")
+    print("Click 4+ ground-plane reference points in the window, then press 'q'.")
     while True:
         key = cv2.waitKey(20) & 0xFF
         if key == ord('q'):
@@ -158,7 +156,7 @@ def main():
                 f"No display available for interactive mode ({e}).\n"
                 f"Re-run with --points instead, e.g.:\n"
                 f'  --points \'[[x1,y1,wx1,wy1],[x2,y2,wx2,wy2],...]\''
-            )
+            ) from None
 
     H, src, dst = build_homography(points)
 

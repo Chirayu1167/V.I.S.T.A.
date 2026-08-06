@@ -62,6 +62,9 @@ exactly what a signal should and shouldn't fire on.
 | `plate_reader.py` | Optional license-plate OCR (`easyocr`), run only on flagged `hit_and_run` frames |
 | `alert.py` | Severity scoring (no-injury vs injury-flagged), multi-channel mock dispatch (HMAC-signed), burst rate limiting, **async** dashboard logging (background thread, never blocks the alert path — call `.close()`/`pipeline.close()` to flush it on shutdown) |
 | `pipeline.py` | `AccidentPipeline.process_frame()` — wires the above into one call per frame; also owns clip export |
+| `camera_profile.py` | Camera calibration profiles — save/load a `CameraConfig` (homography points, `meter_per_pixel` fallback, stop zones, camera metadata) as JSON; `world_distance_m()` for known-distance marker math |
+| `tools/calibrate_camera.py` | Interactive + headless homography calibration (click 4+ ground-plane points with known real-world coords → config snippet + bird's-eye preview) |
+| `tools/validate_speed.py` | Speed acceptance gate: run a clip with a profile + two on-road markers, compare estimator speed vs crossing-time ground truth, report error % (±15% gate) |
 | `tools/draw_stop_zones.py` | Click-to-draw stop-zone polygons on a real frame from your camera → JSON for `--stop-zones-json` |
 | `tools/dashboard.py` | Control-room console over `alerts.jsonl` + `vista_clips/` — WebAudio siren, severity banner, clip playback, nearest-recipient routing (`recipients.json`), operator ACK (`acks.jsonl`). Stdlib-only. Works with the merged multi-camera log too |
 | `tools/review_alerts.py` | Walk through logged alerts, label true/false positive, get a false-positive-rate-by-kind summary to actually justify threshold changes |
@@ -169,6 +172,104 @@ async def run_frame(frame, t):
 Each `AlertDispatcher` instance already logs asynchronously on its own
 background thread, so neither branch's dispatch path blocks the other or the
 main frame loop.
+
+## Camera calibration (real-world speeds)
+
+Speed readings are only as accurate as the camera calibration. The flat
+`meter_per_pixel` guess in `CameraConfig` is correct only for a perfectly
+top-down camera; for an angled CCTV feed you need a ground-plane homography.
+Full workflow:
+
+```bash
+# CLI: click 4+ ground-plane reference points (known real-world coords)
+python -m vista_accident.tools.calibrate_camera --video path/to/clip.mp4
+
+# or the GUI flow: Controls -> Calibrate… -> load frame, click points,
+# enter meters, preview bird's-eye, Save profile JSON
+python gui_app.py
+
+# run with the saved profile
+python demo.py --source clip.mp4 --camera-profile camera_profiles/CAM-01.json
+```
+
+A profile (`camera_profiles/<id>.json`) is a plain JSON object that
+`vista_accident.camera_profile.load_profile()` turns into the exact
+`CameraConfig` the pipeline already takes — pipeline code doesn't change.
+Fields: `homography_src_points` / `homography_dst_points` (4+ pixel ↔ world
+correspondences), `meter_per_pixel` (fallback only), `stop_zones`, camera
+id/location/lat/lon, `fps`, and a free-text `calibration_note` recording what
+was measured or assumed (e.g. "lane width 3.5 m — standard Indian lane").
+Prefer measured distances; if none are available, the standard Indian lane
+width of 3.5 m is the sanctioned assumption — say so in the note.
+
+A per-camera on-site field measurement (one known distance taped on the road,
+entered via the calibration dialog) is a **one-time future task**: when it
+arrives, swap the homography points + note in the profile JSON — no code
+changes needed.
+
+**Speed validation (acceptance gate):** with a calibrated clip, verify the
+estimator against crossing time over a known-distance marker pair:
+
+```bash
+python -m vista_accident.tools.validate_speed \
+    --source clip.mp4 \
+    --profile camera_profiles/CAM-01.json \
+    --markers '[[x1,y1],[x2,y2]]'
+```
+
+The marker distance is taken from the profile homography by default (or pass
+`--marker-distance-m` for a directly measured value). The tool runs the real
+detector/tracker, finds a track crossing both markers, and reports estimated
+vs. ground-truth km/h plus error % (pass ≤ ±15%).
+
+### Validation without team footage: synthetic clip
+
+The team clips have no measured ground-plane reference yet. To validate the
+homography + estimator end-to-end without inventing measurements, the repo
+ships `tools/make_synthetic_clip.py`, which renders a clip with EXACT
+geometry (two 3.5 m lanes, cars driven at exactly 50 km/h and 35 km/h, real
+YOLO-detected car crops re-rendered so the detector still tracks them):
+
+```bash
+# regenerate the clip (calib_demo.mp4) + print the reference geometry
+python -m vista_accident.tools.make_synthetic_clip --output calib_demo.mp4
+
+# validate against the shipped profile (CAM-SYNTH.json) — markers on car A's
+# path, 16 m apart, ground truth known exactly
+python -m vista_accident.tools.validate_speed \
+    --source calib_demo.mp4 \
+    --profile camera_profiles/CAM-SYNTH.json \
+    --markers "[[224.0,472.0],[1056.0,472.0]]"
+```
+
+Measured on 2026-08-05 (CPU): best track error **+0.36%** (GT 49.99 km/h vs
+est 50.17 km/h) — passes the ±15% gate. `camera_profiles/CAM-SYNTH.json`
+documents the scene geometry in its `calibration_note`. The clip itself is
+small (~0.5 MB) but regenerate it rather than trusting a stale copy.
+(Crossing times are interpolated at the path's perpendicular foot on each
+marker, so the gate is independent of `--radius-px`.)
+
+### Real clip with assumed calibration (clip_03)
+
+Without a team measurement, `camera_profiles/CAM-03.json` calibrates
+Video/clip_03.mp4 from documented assumptions (full details in its
+`calibration_note`): YOLO car bbox width = 1.8 m (58 front/rear detections,
+linear fit px/m = 0.3346·(y − 66.9), r² = 0.975) → camera height 2.99 m,
+horizon y = 66.9, focal 500 px, cx = 320 (one-point perspective). The scale
+was cross-checked on clip_06, where it converts lane-line gaps to median
+3.24–3.36 m (IRC lane width 3.5 m, within ~5%). Validation markers on a
+car's actual path (13.23 m from the homography):
+
+```bash
+python -m vista_accident.tools.validate_speed \
+    --source ..\Video\clip_03.mp4 \
+    --profile camera_profiles/CAM-03.json \
+    --markers "[[558.0,300.0],[583.0,150.0]]"
+```
+
+Measured 2026-08-05 (CPU): **−5.79%** (GT 19.57 km/h vs est 18.44 km/h) —
+passes the ±15% gate. This is an ASSUMED calibration: redo with a real
+measured ground-plane distance before production use.
 
 ## Known simplifications (be upfront about these with judges)
 

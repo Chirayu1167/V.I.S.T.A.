@@ -19,7 +19,7 @@ class ScriptedDetector(Detector):
         self._i = 0
         self.script = []
 
-    def detect(self, frame):
+    def detect(self, _frame):
         boxes = self.script[self._i] if self._i < len(self.script) else []
         self._i += 1
         return boxes
@@ -172,7 +172,7 @@ def test_collision():
     dispatched = sum(1 for _, _, s in p.confirmed_log if s == "dispatched")
     print(f"[fuse] events={len(evs)} kinds={kinds} dispatched={dispatched}")
     assert "collision" in kinds, "FAIL: collision not detected"
-    assert dispatched >= 1, f"FAIL: collision did not dispatch"
+    assert dispatched >= 1, "FAIL: collision did not dispatch"
     print("PASS: head-on collision -> dispatched alert")
 
 

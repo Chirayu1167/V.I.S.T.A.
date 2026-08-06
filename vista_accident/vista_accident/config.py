@@ -6,6 +6,30 @@ Tune these numbers against your actual camera height/angle and frame rate —
 pixel-based velocity thresholds are resolution- and camera-distance-dependent.
 For the hackathon demo, defaults are tuned assuming a ~1280x720, ~15-30fps
 CCTV-style overhead/angled feed.
+
+Threshold audit (real-world speeds)
+-----------------------------------
+All HeuristicConfig velocities are in PHYSICAL units (m/s) — they were
+converted from the old pixel/second values using the flat 0.05 m/px scale
+and kept when the ML speed estimator (homography-based, see
+CameraConfig + speed_estimator.py) became the default. With a calibrated
+homography the estimator reports honest m/s, so the same numbers still
+describe physical behaviour:
+
+    speed_drop_min_prior_speed      2.0 m/s  (7.2 km/h)  — must have been
+                                                          moving before drop
+    collision_max_velocity          0.75 m/s (2.7 km/h)  — "stopped at impact"
+    collision_min_prior_speed       3.5 m/s  (12.6 km/h) — impact approach speed
+    anomaly_stop_max_velocity       0.5 m/s  (1.8 km/h)  — stationary cap
+    anomaly_stop_min_prior_speed    1.5 m/s  (5.4 km/h)  — moving before stop
+    hitrun_vehicle_continues_min_speed 1.0 m/s (3.6 km/h) — perp keeps moving
+
+Audited 2026-08-04 after the homography calibration work: these remain
+sane for calibrated speeds (a real crash approach is well above 12.6 km/h;
+a genuinely stopped car sits below 1.8 km/h including tracker jitter). No
+changes were needed. If you switch to uncalibrated pixel speed readings
+(use_ml_speed=False, no homography), re-derive thresholds from your
+meter_per_pixel instead of trusting these m/s values.
 """
 
 import json
@@ -316,7 +340,7 @@ class ConfigWatcher:
             with open(self.path) as f:
                 data = json.load(f)
         except (OSError, json.JSONDecodeError) as e:
-            warnings.warn(f"ConfigWatcher: failed to read/parse {self.path}: {e}")
+            warnings.warn(f"ConfigWatcher: failed to read/parse {self.path}: {e}", stacklevel=2)
             return False
 
         if self.heuristic_cfg is not None:
@@ -330,7 +354,7 @@ class ConfigWatcher:
         valid = {f.name for f in fields(cfg_obj)}
         for key, value in updates.items():
             if key not in valid:
-                warnings.warn(f"ConfigWatcher: unknown field '{key}', ignoring")
+                warnings.warn(f"ConfigWatcher: unknown field '{key}', ignoring", stacklevel=2)
                 continue
             setattr(cfg_obj, key, value)
 

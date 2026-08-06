@@ -35,7 +35,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
@@ -132,7 +132,7 @@ class BatchCollector:
                 results = [[] for _ in batch]
                 print(f"[BatchCollector:{self._thread.name}] batch inference error: {e}")
 
-            for pending, result in zip(batch, results):
+            for pending, result in zip(batch, results, strict=True):
                 pending.result = result
                 pending.result_event.set()
 

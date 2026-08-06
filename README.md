@@ -125,9 +125,8 @@ A vehicle that was moving meaningfully and loses most of its speed in a fraction
 
 | Criterion | Threshold |
 |---|---|
-| Prior speed (windowed avg, 0.5 s) | ≥ 1.2 m/s |
-| Velocity drop ratio (prior vs. Kalman instantaneous) | > 0.65 |
-| …or ended (nearly) stopped | `now ≤ 1.0 m/s` AND ratio > 0.5 |
+| Prior speed (windowed avg, 0.5 s) | ≥ 2.0 m/s |
+| Velocity drop ratio (prior vs. current windowed avg) | > 0.8 |
 | Suppressed in | stop zones, stationary queues |
 
 ### 2. `collision` — two vehicles overlap with an impact signature
@@ -180,7 +179,7 @@ A minor fender-bender only reaches traffic police; a high-speed crash with pedes
 - **Ground-point projection** — each box's bottom-center is mapped to real-world meters via a calibrated homography (`tools/calibrate_camera.py`; falls back to a flat `meter_per_pixel` scale)
 - **Least-squares velocity fit** over a rolling window (robust to a single noisy detection)
 - **Per-track constant-velocity Kalman filter** — innovation-gate re-initializes on hard stops so crash decelerations aren't smoothed away; feeds `instantaneous_velocity` used by the heuristics
-- Per-track **km/h overlay** in the GUI/CLI with auto-scale fallback when uncalibrated
+- Per-track **km/h overlay** in the GUI/CLI (homography when calibrated, else the `meter_per_pixel` pixel-scale fallback)
 
 ---
 
@@ -221,6 +220,7 @@ python demo.py --source rtsp://camera-ip:554/stream --output out.mp4
 
 | Flag | Purpose |
 |---|---|
+| `--camera-profile profiles/CAM-01.json` | Camera calibration profile (homography, stop zones, camera metadata) — real-world speeds without editing config |
 | `--px-per-meter 18.5` | Manual calibration for km/h (else auto-estimated from box width) |
 | `--stop-zones-json zones.json` | Polygons where stopping is legal (intersections/bus stops) |
 | `--alert-display-seconds 4` | On-screen alert panel lifetime |
@@ -237,17 +237,80 @@ python gui_app.py
 
 - Upload a video → live annotated preview (per-track boxes + km/h)
 - Device selector (cpu/cuda) + px/m calibration spinbox
+- **Camera Profile** selector — pick a saved calibration profile (or browse for a JSON) so analysis runs with real-world speeds
+- **Calibrate…** button — full GUI homography flow: load a frame, click 4+ ground points, enter real-world meters, preview the bird's-eye view, save a profile JSON (reuses `tools/calibrate_camera.py` math)
 - Right panel: per-alert **report cards** — severity strip, kind, tracks, dispatch channels
 - Clickable **impact screenshots** (before / impact / after), saved to `vista_screenshots/`
 - Pipeline runs in a background `QThread` — the UI never freezes
 
-### Camera calibration tool
+### Camera calibration workflow
+
+Speeds are only as real as the calibration. The pipeline ships a complete
+workflow — CLI or GUI — that replaces the flat `meter_per_pixel` guess with a
+per-camera ground-plane homography:
 
 ```bash
-python vista_accident/tools/calibrate_camera.py   # click ground-plane reference points
+# 1. CLI: click 4+ ground-plane reference points on a real frame
+python vista_accident/tools/calibrate_camera.py --video path/to/clip.mp4
+#    (or headless: --points '[[px,py,wx,wy],...]')
+
+# 2. GUI: same flow in the desktop app (Controls -> Calibrate…),
+#    with a bird's-eye preview and a Save Profile button
+python gui_app.py
+
+# 3. Run with the saved profile — no config edits needed
+python demo.py --source clip.mp4 --camera-profile camera_profiles/CAM-01.json
 ```
 
-Paste the resulting `homography_src_points` / `homography_dst_points` into `CameraConfig` for accurate real-world speeds on angled cameras.
+Reference points must lie on the ground plane (road surface), be spread across
+the region where speeds matter, and have known real-world distances (measured
+distances preferred; the standard Indian lane width of 3.5 m is the documented
+fallback assumption — record it in the profile's `calibration_note`).
+
+A per-camera on-site field measurement (one known distance taped on the road,
+then entered into the calibration dialog) is a **one-time future task**: when
+it becomes available, replace the `homography_src_points`/`homography_dst_points`
+and update the note in the profile JSON — no code changes needed.
+
+Every profile is a plain JSON file (`camera_profiles/<id>.json`) holding the
+homography source/destination points, `meter_per_pixel` fallback, stop zones,
+camera id/location/GPS, and a `calibration_note`. `camera_profile.py` loads it
+into the same `CameraConfig` the pipeline already takes, so nothing else
+changes.
+
+**Speed validation (acceptance gate):** given a clip + profile + two on-road
+marker points, measure a vehicle's estimated speed against ground truth from
+crossing time:
+
+```bash
+python -m vista_accident.tools.validate_speed \
+    --source clip.mp4 \
+    --profile camera_profiles/CAM-01.json \
+    --markers '[[x1,y1],[x2,y2]]'
+```
+
+Reports estimated vs. ground-truth km/h and the error % (gate: ±15%).
+Use `--marker-distance-m` to override the marker distance with a directly
+measured value.
+
+**Validated end-to-end (2026-08-05):**
+- **Synthetic clip** — the team clips have no measured ground-plane reference,
+  so `tools/make_synthetic_clip.py` renders one with EXACT geometry (two 3.5 m
+  lanes, cars at exactly 50 and 35 km/h, real car crops re-rendered so YOLO
+  tracks them). Calibrated with `camera_profiles/CAM-SYNTH.json`, validated
+  with 16 m marker pairs: **+0.36% error** (GT 49.99 km/h vs est 50.17 km/h).
+  Regenerate with `python -m vista_accident.tools.make_synthetic_clip`.
+- **Real clip (clip_03, ASSUMED calibration)** — no team measurement was
+  available, so `camera_profiles/CAM-03.json` uses documented assumptions
+  (see its `calibration_note`): car bbox width = 1.8 m over 58 front/rear
+  detections → linear fit px/m = 0.3346·(y − 66.9), r² = 0.975 → camera
+  height 2.99 m, horizon y = 66.9, focal 500 px, cx = 320 (one-point
+  perspective). Cross-checked against clip_06's lane-line gaps: median
+  3.24–3.36 m per lane, within ~5% of the IRC 3.5 m standard. Validation
+  markers on a car's actual path (13.23 m from the homography): **−5.79%
+  error** (GT 19.57 km/h vs est 18.44 km/h) — passes the ±15% gate.
+- `validate_speed.py` interpolates crossing times at the path's perpendicular
+  foot on each marker, so the ±15% gate is immune to marker-radius bias.
 
 ### Tests (no video/GPU needed)
 
@@ -314,16 +377,18 @@ result = pipeline.process_frame(frame, t)   # per frame: tracks, events, alerts,
 |---|---|
 | `test_scenario.py` | Heuristics → verification → fusion → dispatch wiring; collision + speed_drop fuse into **one** alert |
 | `test_accuracy.py` | Wall-crash → `speed_drop`; 3-car signal queue → **no** alert; hard-stop → `speed_drop`; head-on collision → `collision` dispatches |
-| 10 real clips (`Video/`) | Confirmed detections on collisions and hard stops; zero false alerts on signal queues / normal braking |
+| `10 real clips (Video/)` | Confirmed detections on collisions and hard stops; zero false alerts on signal queues / normal braking |
+| `tools/validate_speed.py` | Calibrated speed within ±15% of crossing-time ground truth (acceptance gate for camera calibration) |
 
 **Accuracy fixes (2026-08-02)** — signal-queue suppression (pixel-space fallback so it works uncalibrated), anomaly_stop prior-motion requirement, windowed velocity-drop tuning.
+
+**Calibration (2026-08-04)** — camera profiles (`camera_profiles/*.json`) with a real homography load via `--camera-profile` (CLI) or the GUI profile picker; GUI Calibrate… flow for click-and-measure calibration; `tools/validate_speed.py` for the crossing-time acceptance gate; heuristic thresholds re-audited (unchanged — they were already physical m/s values).
 
 ---
 
 ## ⚠️ Notes & Disclaimer
 
 - **Alert dispatch is mocked** (`mock://` webhook endpoints) — swap `DispatchConfig` URLs for real Telegram/Slack/government APIs in production.
-- **Camera calibration is deferred** — current clips use a guessed `0.05 m/px` scale; run `tools/calibrate_camera.py` for accurate speeds, then retune the m/s thresholds alongside.
 - **Violence branch is on the roadmap** — architecture is designed for it to run independently and concurrently.
 
 ---

@@ -23,7 +23,7 @@ import numpy as np
 from .alert import AlertDispatcher, VIOLENCE_CHANNELS_BY_SEVERITY
 from .config import CameraConfig, DispatchConfig, HeuristicConfig, ViolenceConfig
 from .fusion import IncidentFuser
-from .severity import SeverityAssessor, SeverityConfig
+from .severity import SeverityAssessor
 from .tracker import Tracker
 from .verification import Verifier
 from .violence_heuristics import KEYPOINT_CONF_THRESHOLD, PoseHistory, check_violence
@@ -44,7 +44,7 @@ class PoseDetector:
             import torch
             if device == "cuda" and not torch.cuda.is_available():
                 import warnings
-                warnings.warn("CUDA not available for violence branch. Falling back to CPU.")
+                warnings.warn("CUDA not available for violence branch. Falling back to CPU.", stacklevel=2)
                 self.device = "cpu"
         except ImportError:
             self.device = "cpu"
@@ -231,7 +231,7 @@ class ViolencePipeline:
                 best_iou, best = iou, kpts
         return best
 
-    def _dispatch_event(self, event, t: float) -> Optional[object]:
+    def _dispatch_event(self, event, _t: float) -> Optional[object]:
         severity = self.severity.assess(event, None)
         clip_path = None
         if self.clip_dir:

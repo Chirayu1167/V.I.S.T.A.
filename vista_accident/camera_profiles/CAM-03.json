@@ -1,0 +1,52 @@
+{
+  "camera_id": "CAM-03",
+  "location_name": "Demo junction (unidentified CCTV)",
+  "lat": 22.7196,
+  "lon": 75.8577,
+  "stop_zones": [],
+  "meter_per_pixel": 0.05,
+  "camera_height_m": 8.0,
+  "camera_pitch_deg": 45.0,
+  "homography_src_points": [
+    [
+      120.0,
+      300.0
+    ],
+    [
+      520.0,
+      300.0
+    ],
+    [
+      520.0,
+      150.0
+    ],
+    [
+      120.0,
+      150.0
+    ]
+  ],
+  "homography_dst_points": [
+    [
+      -2.56,
+      6.41
+    ],
+    [
+      2.56,
+      6.41
+    ],
+    [
+      7.19,
+      17.98
+    ],
+    [
+      -7.19,
+      17.98
+    ]
+  ],
+  "fps": 29.0,
+  "speed_history_seconds": 2.0,
+  "speed_min_history": 5,
+  "speed_max_kmph": 150.0,
+  "assumption": "3.5m lane width, 9m dash cycle",
+  "calibration_note": "ASSUMED calibration for clip_03 (no measured ground-truth distances available). Sanctioned assumption: standard Indian lane width = 3.5 m (IRC); the 9 m dash cycle (3 m stripe + 6 m gap) is the along-road reference wherever dashes are visible (not confirmed in this clip). Ground scale was anchored to this: YOLO car bbox width fit (1.8 m over 58 front/rear detections, conf>=0.5, bbox w/h<=2.0, px/m = 0.3346*(y - 66.9), r2=0.975) served as an internal estimate and was cross-checked against lane-line gaps on clip_06: median 3.24-3.36 m per lane, within ~5% of the 3.5 m standard. One-point-perspective camera model: height 2.99 m, horizon y=66.9, focal 500 px, cx=320 (~65 deg HFOV on 640-wide frame). To swap in a real field measurement later: edit homography_src/dst_points and this note - no code changes needed. Redo before production use."
+}

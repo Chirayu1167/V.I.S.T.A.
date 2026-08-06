@@ -35,7 +35,7 @@ class ZoneDrawer:
         self.polygons = []       # list of completed polygons: [[(x,y), ...], ...]
         self.current = []        # points of the in-progress polygon
 
-    def on_mouse(self, event, x, y, flags, param):
+    def on_mouse(self, event, x, y, _flags, _param):
         if event == cv2.EVENT_LBUTTONDOWN:
             self.current.append((x, y))
 
