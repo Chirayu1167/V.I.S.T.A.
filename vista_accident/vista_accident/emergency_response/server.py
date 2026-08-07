@@ -118,6 +118,7 @@ def page(title, body, extra_head=""):
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>{title}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <style>{BASE_CSS}</style>
 {extra_head}
@@ -135,7 +136,6 @@ def page(title, body, extra_head=""):
 </header>
 <main>{body}</main>
 <footer>Demo system &mdash; GPS captured via browser Geolocation API, distances via Haversine formula. No hardcoded routing.</footer>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 </body></html>"""
 
 
