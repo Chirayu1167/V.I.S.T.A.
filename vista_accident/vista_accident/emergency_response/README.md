@@ -3,7 +3,10 @@
 Additive extension of the existing VISTA accident-detection project.
 Nothing under `vista_accident/` (the ML pipeline) was changed — this is a
 new, self-contained module that adds three authority dashboards and a
-citizen incident-report page on top of the same demo.
+citizen incident-report page on top of the same demo. As of 2026-08-08 it
+is also the **single dispatch-side UI**: the old control-room console
+(`tools/dashboard.py`, `recipients.json`, `acks.jsonl`) was removed and its
+siren / severity banner / clip playback / ACK features were merged in here.
 
 ## What this adds
 
@@ -14,7 +17,16 @@ citizen incident-report page on top of the same demo.
   — three separate live dashboards, each showing the incidents routed to
   that authority type, with GPS coordinates, distance, severity, timestamp,
   a status control (notified → acknowledged → dispatched → resolved), and
-  an interactive Leaflet/OpenStreetMap map.
+  an interactive Leaflet/OpenStreetMap map. Dashboards also host the
+  dispatch-alerting features merged in from the removed control-room
+  console:
+  - **severity banner** + **Web Audio siren** (ARM first — browsers block
+    autoplay) on new incidents,
+  - **per-alert CCTV clip playback** from `vista_clips/` under `/clips/`
+    (with HTTP Range support for reliable seeking), shown for every
+    ML-detected incident whose clip has been written,
+  - an ACK workflow expressed as the status control: the siren loop runs
+    while a critical incident is still `notified`/`acknowledged`.
 - A small stdlib-only HTTP + SQLite backend (`server.py`, `db.py`, `geo.py`)
   that:
   1. Stores every incident with its real captured lat/lon and timestamp.
@@ -85,8 +97,7 @@ live dashboards.
 
 - `authorities(id, type, name, lat, lon, address, contact)` — seeded on
   first run from `data/seed_authorities.json` (5 hospitals, 5 police
-  stations, 5 traffic police stations around Indore, MP — same city as the
-  existing `recipients.json` demo data).
+  stations, 5 traffic police stations around Indore, MP).
 - `incidents(id, incident_type, lat, lon, timestamp, severity, meta)`
 - `notifications(id, incident_id, authority_id, authority_type,
   distance_km, notified_at, status)`

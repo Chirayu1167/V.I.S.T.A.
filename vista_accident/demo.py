@@ -5,7 +5,7 @@ VISTA — Accident Detection demo runner (CLI).
 Runs the accident branch on a local video file (stand-in for an RTSP CCTV
 feed), overlays track boxes + per-track speed + heuristic triggers, writes
 an annotated output video, and logs confirmed alerts to alerts.jsonl (the
-"dashboard" log).
+"alert log").
 
 For an interactive local desktop UI (upload button, live preview, side-panel
 report, impact screenshots) use gui_app.py instead — see:

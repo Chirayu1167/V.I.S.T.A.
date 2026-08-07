@@ -8,8 +8,9 @@ camera, each on its own thread — same per-camera behavior as before
 hot-reload, clip export, all unchanged). Every pipeline's AlertDispatcher
 still logs asynchronously on its own background thread and every
 AlertPayload still carries its own camera_id, so pointing them all at the
-SAME dashboard_log_path still gives you one merged feed for
-tools/dashboard.py without any extra plumbing.
+SAME dashboard_log_path still gives you one merged feed — and, with the
+ML bridge enabled, one merged view on the Emergency Response dashboards
+(emergency_response/server.py) without any extra plumbing.
 
 What's different from the original per-camera-model version: there is now
 exactly ONE Detector and (if --enable-violence) ONE PoseDetector for the
@@ -32,8 +33,9 @@ Config file (--config, JSON):
 Usage:
     python multi_camera.py --config cameras.json --log alerts.jsonl
     python multi_camera.py --config cameras.json --log alerts.jsonl --enable-violence
-    # in another terminal:
-    python -m vista_accident.tools.dashboard --log alerts.jsonl
+    # in another terminal (dispatch UI — siren/banner/clips/status):
+    python -m vista_accident.emergency_response.server --port 8890
+    python demo.py --source cam.mp4 --emergency-response-url http://127.0.0.1:8890/api/incidents
 
 Note: each camera's AlertDispatcher opens its own file handle in append
 mode on the shared log path. Individual JSONL lines are written+flushed as

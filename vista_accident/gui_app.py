@@ -48,17 +48,12 @@ from vista_accident.confirmation import SecondaryConfirmation
 from vista_accident.render import SEVERITY_COLORS, SEVERITY_RANK, SpeedEstimator, draw_overlay
 
 # Absolute base dir of THIS file (not cwd!): the GUI can be launched from
-# anywhere (shortcut, Explorer, terminal) â€” the alert log, clips, screenshots
-# and the control-room console must all anchor to the same place, otherwise
-# the console watches a different alerts.jsonl than the GUI writes and shows
-# nothing.
+# anywhere (shortcut, Explorer, terminal) â€” the alert log and clips must all
+# anchor to the same place the Emergency Response server reads them from.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ALERTS_LOG = os.path.join(BASE_DIR, "alerts.jsonl")
 SCREENSHOT_DIR = os.path.join(BASE_DIR, "vista_screenshots")
 CLIP_DIR = os.path.join(BASE_DIR, "vista_clips")  # per-alert clips (pre/post impact)
-RECIPIENTS_PATH = os.path.join(BASE_DIR, "recipients.json")
-ACKS_PATH = os.path.join(BASE_DIR, "acks.jsonl")
-CONTROL_ROOM_URL = "http://localhost:8787"
 # Emergency Response server bridge: when the "Open Emergency Response"
 # button has started the server, dispatched alerts are POSTed to it so the
 # hospital/police/traffic dashboards show ML-detected incidents (None =
@@ -546,7 +541,6 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.alert_cards = {}
         self.alert_count = 0
-        self.control_proc = None
         self.camera_cfg = None           # always None now — calibration is automatic
 
         central = QWidget()
@@ -576,26 +570,18 @@ class MainWindow(QMainWindow):
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.clicked.connect(self.on_stop)
         self.stop_btn.setEnabled(False)
-        self.control_room_btn = QPushButton("Open Control Room")
-        self.control_room_btn.setToolTip(
-            "Start the control-room console (siren + clip playback + routed "
-            "recipients) in a browser â€” it watches alerts.jsonl and vista_clips/"
-        )
-        self.control_room_btn.clicked.connect(self.on_open_control_room)
-
         self.emergency_btn = QPushButton("Open Emergency Response")
         self.emergency_btn.setToolTip(
             "Start the Emergency Response server (hospital / police / traffic "
-            "police dashboards). Each detected alert is then also posted there "
-            "so the dashboards show ML-detected incidents + nearest-authority "
-            "routing."
+            "police dashboards). Each detected alert is posted there so the "
+            "dashboards show ML-detected incidents + nearest-authority routing, "
+            "with a severity banner, siren and the per-alert CCTV clip."
         )
         self.emergency_btn.clicked.connect(self.on_open_emergency_response)
 
         controls.addWidget(self.upload_btn)
         controls.addWidget(self.pause_btn)
         controls.addWidget(self.stop_btn)
-        controls.addWidget(self.control_room_btn)
         controls.addWidget(self.emergency_btn)
         controls.addStretch(1)
 
@@ -752,41 +738,12 @@ class MainWindow(QMainWindow):
         paused = self.worker.toggle_pause()
         self.pause_btn.setText("Resume" if paused else "Pause")
 
-    def on_open_control_room(self):
-        """Launch the control-room console server (if not already running)
-        and open it in the default browser. The console is a separate process
-        that watches the SAME absolute alerts.jsonl + vista_clips/ this GUI
-        writes to â€” the two-interface demo flow (this GUI detects, the
-        console displays with siren/clip). The console is spawned detached
-        with an explicit cwd so it works no matter where the GUI itself was
-        launched from, and it outlives this window."""
-        if not self._control_room_running():
-            flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
-            self.control_proc = subprocess.Popen(
-                [sys.executable, "-m", "vista_accident.tools.dashboard",
-                 "--log", ALERTS_LOG, "--clips", CLIP_DIR,
-                 "--recipients", RECIPIENTS_PATH, "--acks", ACKS_PATH],
-                cwd=BASE_DIR,
-                creationflags=flags,
-            )
-        QDesktopServices.openUrl(QUrl(CONTROL_ROOM_URL))
-
-    @staticmethod
-    def _control_room_running():
-        """True if something already listens on the console port â€” a stale
-        server started earlier would otherwise steal the port and a second
-        spawn would die silently, leaving the browser on the wrong instance."""
-        import socket
-        try:
-            with socket.create_connection(("127.0.0.1", 8787), timeout=0.5):
-                return True
-        except OSError:
-            return False
-
     def on_open_emergency_response(self):
         """Start the Emergency Response server (hospital/police/traffic
-        dashboards) and enable the alert forwarder. Started detached so it
-        outlives this window; a second click uses the running instance."""
+        dashboards) and enable the alert forwarder. The dashboards now carry
+        the siren + severity banner + per-alert CCTV clip playback once the
+        clip file lands. Started detached so it outlives this window; a second
+        click uses the running instance."""
         if not self._emergency_running():
             flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
             subprocess.Popen(
@@ -872,9 +829,9 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait()
-        # NOTE: the control-room console is deliberately left running â€” it's
-        # an independent display (big-screen demo), and the port-busy check
-        # in on_open_control_room prevents duplicate servers.
+        # NOTE: the Emergency Response server is deliberately left running â€” it's
+        # an independent display (dashboards + siren + clip playback), and the
+        # port-busy check in on_open_emergency_response prevents duplicate servers.
         event.accept()
 
 

@@ -46,6 +46,13 @@ INCIDENT_TYPES = ["accident", "road_rage", "hit_and_run", "breakdown", "other"]
 SEVERITIES = ["low", "medium", "high", "critical"]
 NEAREST_N = 3
 
+# Evidential clip files written by the ML pipelines (gui_app.py / demo.py)
+# land here. Each ML-detected incident carries a clip_path in meta; we serve
+# the clips by basename under /clips/ so the dashboards can play the footage.
+DEFAULT_CLIP_DIR = os.path.abspath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "vista_clips",
+))
+
 # ---------------------------------------------------------------------------
 # Shared page chrome (kept as string templates, stdlib-only — same approach
 # as tools/dashboard.py elsewhere in this project).
@@ -89,6 +96,22 @@ label { font-size:12px; color:#9a9da6; display:block; margin:10px 0 4px; }
 #gpsStatus { font-size:12.5px; margin-top:8px; color:#9a9da6; }
 #gpsStatus.ok { color:#5fd15f; } #gpsStatus.err { color:#e0503c; }
 footer { text-align:center; color:#5a5d66; font-size:11px; padding:20px; }
+#sirenBar { display:flex; align-items:center; gap:12px; padding:10px 0 14px; }
+#sirenBar #armState { font-size:12px; font-weight:600; letter-spacing:1px; }
+#sirenBar #armState.disarmed { color:#e0503c; }
+#sirenBar #armState.armed { color:#5fd15f; }
+#armBtn { background:#7a2e2e; border-color:#a04a4a; font-weight:700; }
+#armBtn.armed { background:#2e6a33; border-color:#4a9a52; }
+#testBtn:disabled { opacity:.4; cursor:default; }
+#clipBox { position:relative; margin-bottom:14px; }
+#clipBox video { width:100%; max-height:360px; background:#000; border-radius:8px; }
+#clipBox .close { position:absolute; top:8px; right:8px; background:#2c2c33; border:1px solid #3d3d45; }
+#banner { position:fixed; top:0; left:0; right:0; z-index:50; transform:translateY(-120%); transition:transform .25s; }
+#banner.show { transform:translateY(0); }
+#banner .inner { padding:18px 24px; font-size:16px; font-weight:700; display:flex; gap:20px; align-items:center; flex-wrap:wrap; background:#16181e; border-bottom:1px solid #23262e; }
+body.flash-critical { animation: flashRed 1s ease-in-out 5; }
+@keyframes flashRed { 0%,100% { background:#0d0f13; } 50% { background:#3a1111; } }
+.clip-link { color:#5fd15f; cursor:pointer; text-decoration:underline; margin-top:6px; display:inline-block; font-size:11.5px; }
 """
 
 def page(title, body, extra_head=""):
@@ -250,9 +273,19 @@ def render_report_page():
 def render_dashboard_page(authority_type):
     label = AUTHORITY_LABELS[authority_type]
     body = f"""
+    <div id="sirenBar">
+      <span id="armState" class="disarmed">SIREN DISARMED</span>
+      <button id="armBtn">ARM SIREN</button>
+      <button id="testBtn" disabled>TEST</button>
+    </div>
+    <div id="banner"><div class="inner" id="bannerInner"></div></div>
     <div class="panel" style="margin-bottom:14px">
       <label>Filter by station</label>
       <select id="authoritySelect"><option value="">All {label} stations</option></select>
+    </div>
+    <div id="clipBox" style="display:none">
+      <video id="video" controls muted></video>
+      <button class="close" id="clipClose">✕ Close clip</button>
     </div>
     <div class="grid">
       <div><div id="map"></div></div>
@@ -263,11 +296,85 @@ def render_dashboard_page(authority_type):
     </div>
     <script>
     const AUTHORITY_TYPE = {json.dumps(authority_type)};
+    const SEV_COLOR = {{low:'#5fd15f', medium:'#e0c34d', high:'#e08a3c', critical:'#e0503c'}};
     let map = L.map('map').setView([22.7196, 75.8577], 12);
     L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
       attribution: '&copy; OpenStreetMap contributors'
     }}).addTo(map);
     let markers = [];
+
+    // --- WebAudio siren: ARM in the browser (autoplay policy), then every new
+    // critical/unacknowledged incident keeps the loop; ACK to silence it.
+    let armed = false, audioCtx = null, sirenLoop = null;
+    const armBtn = document.getElementById('armBtn');
+    const testBtn = document.getElementById('testBtn');
+    const armState = document.getElementById('armState');
+
+    armBtn.addEventListener('click', () => {{
+      if (!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+      audioCtx.resume();
+      armed = !armed;
+      armBtn.classList.toggle('armed', armed);
+      armBtn.textContent = armed ? 'DISARM SIREN' : 'ARM SIREN';
+      armState.textContent = armed ? 'SIREN ARMED' : 'SIREN DISARMED';
+      armState.className = armed ? 'armed' : 'disarmed';
+      testBtn.disabled = !armed;
+      if (armed) playSweep();
+    }});
+    testBtn.addEventListener('click', playSweep);
+
+    function playSweep(duration=0.9, cycles=2) {{
+      if (!armed || !audioCtx || audioCtx.state === 'suspended') return;
+      const t0 = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(520, t0);
+      for (let c = 0; c < cycles; c++) {{
+        osc.frequency.linearRampToValueAtTime(780, t0 + duration/2 + c*duration);
+        osc.frequency.linearRampToValueAtTime(520, t0 + (c+1)*duration);
+      }}
+      gain.gain.setValueAtTime(0.0001, t0);
+      gain.gain.exponentialRampToValueAtTime(0.32, t0 + 0.04);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + duration*cycles);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(t0); osc.stop(t0 + duration*cycles);
+    }}
+    function startLoop() {{ stopLoop(); sirenLoop = setInterval(() => playSweep(0.9, 2), 1800); }}
+    function stopLoop() {{ if (sirenLoop) {{ clearInterval(sirenLoop); sirenLoop = null; }} }}
+
+    function sevBase(s) {{ return String(s||'').split(' ')[0]; }}
+
+    function showBanner(r) {{
+      const sev = sevBase(r.severity);
+      const color = SEV_COLOR[sev] || '#e0503c';
+      const meta = r.meta || {{}};
+      const el = document.getElementById('banner');
+      document.getElementById('bannerInner').innerHTML =
+        '<span style="color:' + color + '">⚠ ' + sev.toUpperCase() + '</span>' +
+        '<span class="kind">' + String(meta.kind || r.incident_type || '').replace('_',' ') + '</span>' +
+        '<span>Incident ' + r.incident_id + ' &middot; ' + new Date(r.timestamp*1000).toLocaleTimeString() + '</span>' +
+        '<span>' + r.authority_name + '</span>';
+      el.classList.add('show');
+      clearTimeout(showBanner._t);
+      showBanner._t = setTimeout(() => el.classList.remove('show'), 7000);
+      if (sev === 'critical') {{
+        document.body.classList.remove('flash-critical');
+        void document.body.offsetWidth;
+        document.body.classList.add('flash-critical');
+      }}
+      playSweep();
+    }}
+
+    function playClip(name) {{
+      const box = document.getElementById('clipBox');
+      const video = document.getElementById('video');
+      box.style.display = 'block';
+      video.src = '/clips/' + encodeURIComponent(name);
+      video.play().catch(() => {{}});
+      document.getElementById('clipClose').onclick = () => {{ box.style.display='none'; video.pause(); video.removeAttribute('src'); }};
+      box.scrollIntoView({{block:'nearest'}});
+    }}
 
     async function loadAuthorities() {{
       const res = await fetch('/api/authorities?type=' + AUTHORITY_TYPE);
@@ -298,6 +405,11 @@ def render_dashboard_page(authority_type):
       return '<span class="status-pill">Citizen report</span>';
     }}
 
+    function renderClip(r) {{
+      if (!(r.is_ml && r.clip_ready && r.clip_name)) return '';
+      return '<span class="clip-link" onclick="playClip(' + JSON.stringify(r.clip_name) + ')">▶ PLAY CLIP</span>';
+    }}
+
     async function loadIncidents() {{
       const authorityId = document.getElementById('authoritySelect').value;
       let url = '/api/incidents?authority_type=' + AUTHORITY_TYPE;
@@ -308,6 +420,7 @@ def render_dashboard_page(authority_type):
       const list = document.getElementById('list');
       if (rows.length === 0) {{
         list.innerHTML = '<div class="empty">No incidents reported yet.</div>';
+        stopLoop();
         return;
       }}
       list.innerHTML = rows.map(r => {{
@@ -319,7 +432,8 @@ def render_dashboard_page(authority_type):
             ${{renderSource(r)}}<br>
             Incident ${{r.incident_id}} &middot; ${{dt}}<br>
             GPS: ${{r.lat.toFixed(5)}}, ${{r.lon.toFixed(5)}} &middot; ${{r.distance_km.toFixed(2)}} km from ${{r.authority_name}}<br>
-            <span class="status-pill status-${{r.status}}">${{r.status}}</span>
+            <span class="status-pill status-${{r.status}}">${{r.status}}</span><br>
+            ${{renderClip(r)}}
           </div>
           <div style="margin-top:8px">
             <select data-nid="${{r.notification_id}}" class="statusSelect">
@@ -331,6 +445,20 @@ def render_dashboard_page(authority_type):
           </div>
         </div>`;
       }}).join('');
+
+      // Banner + siren for impactful NEW incidents (per dashboard; ACK silences).
+      if (!window.__seenIncidents) window.__seenIncidents = new Set();
+      let criticalOpen = false;
+      rows.forEach(r => {{
+        if (r.is_ml && !window.__seenIncidents.has(r.incident_id)) {{
+          window.__seenIncidents.add(r.incident_id);
+          showBanner(r);
+        }}
+        if (r.status === 'notified' || r.status === 'acknowledged') {{
+          if (sevBase(r.severity) === 'critical') criticalOpen = true;
+        }}
+      }});
+      if (criticalOpen) startLoop(); else stopLoop();
 
       rows.forEach(r => {{
         const m = L.marker([r.lat, r.lon], {{title: r.incident_id}}).addTo(map)
@@ -365,6 +493,7 @@ def render_dashboard_page(authority_type):
 
 class Handler(BaseHTTPRequestHandler):
     db_path = db.DEFAULT_DB_PATH
+    clip_dir = DEFAULT_CLIP_DIR
 
     def log_message(self, fmt, *args):
         pass  # keep stdout quiet; override if you want request logging
@@ -388,6 +517,18 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(raw.decode("utf-8"))
 
     # -- routing -----------------------------------------------------------
+
+    @staticmethod
+    def _augment_incident(row: dict) -> dict:
+        """Add clip_ready / clip_name / camera / kind from meta so the page JS
+        never has to parse paths. Only ML-detected incidents carry a clip."""
+        d = dict(row)
+        meta = d.get("meta") or {}
+        clip_path = meta.get("clip_path")
+        d["clip_ready"] = bool(clip_path and os.path.isfile(clip_path))
+        d["clip_name"] = os.path.basename(clip_path) if clip_path else None
+        d["is_ml"] = meta.get("threshold") == "ml_detected"
+        return d
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -414,8 +555,12 @@ class Handler(BaseHTTPRequestHandler):
             if not authority_type or authority_type not in AUTHORITY_TYPES:
                 return self._send_json(400, {"error": "authority_type is required (hospital|police|traffic_police)"})
             with db.connect(self.db_path) as conn:
-                rows = db.list_incidents_for_authority(conn, authority_type, authority_id)
+                rows = [self._augment_incident(r) for r in
+                        db.list_incidents_for_authority(conn, authority_type, authority_id)]
                 return self._send_json(200, rows)
+
+        if path.startswith("/clips/"):
+            return self._serve_clip(path[len("/clips/"):])
 
         if path.startswith("/api/incidents/"):
             incident_id = path.split("/api/incidents/", 1)[1]
@@ -426,6 +571,44 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(200, incident)
 
         return self._send(404, "Not found")
+
+    def _serve_clip(self, name):
+        """Serve a clip file from the clips dir with Range support so the
+        browser can seek/play HTML5 video reliably. Name is basename-only
+        to prevent path traversal."""
+        safe = os.path.basename(name)
+        path = os.path.join(self.clip_dir, safe)
+        if not os.path.isfile(path):
+            self.send_error(404)
+            return
+        size = os.path.getsize(path)
+        start, end = 0, size - 1
+        range_header = self.headers.get("Range")
+        if range_header and range_header.startswith("bytes="):
+            spec = range_header[6:].split(",")[0].strip()
+            if "-" in spec:
+                s, e = spec.split("-", 1)
+                if s:
+                    start = int(s)
+                if e:
+                    end = min(int(e), size - 1)
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        else:
+            self.send_response(200)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Type", "video/mp4")
+        self.send_header("Content-Length", str(end - start + 1))
+        self.end_headers()
+        with open(path, "rb") as f:
+            f.seek(start)
+            remaining = end - start + 1
+            while remaining > 0:
+                chunk = f.read(min(65536, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
 
     def do_POST(self):
         parsed = urlparse(self.path)
@@ -493,10 +676,14 @@ def main():
     parser = argparse.ArgumentParser(description="VISTA Emergency Response demo server")
     parser.add_argument("--port", type=int, default=8890)
     parser.add_argument("--db", default=db.DEFAULT_DB_PATH)
+    parser.add_argument("--clips", default=DEFAULT_CLIP_DIR,
+                        help="Directory of per-alert evidence clips, served under /clips/ "
+                             "(ML-detected incidents advertise their clip in meta.clip_path)")
     args = parser.parse_args()
 
     db.init_db(args.db)
     Handler.db_path = args.db
+    Handler.clip_dir = os.path.abspath(args.clips)
 
     server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
     print(f"VISTA Emergency Response demo running at http://localhost:{args.port}")
@@ -505,6 +692,7 @@ def main():
     print(f"  Hospital dash:   http://localhost:{args.port}/dashboard/hospital")
     print(f"  Police dash:     http://localhost:{args.port}/dashboard/police")
     print(f"  Traffic dash:    http://localhost:{args.port}/dashboard/traffic_police")
+    print(f"  Clips:           serving {Handler.clip_dir} at /clips/ (ML evidence footage)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

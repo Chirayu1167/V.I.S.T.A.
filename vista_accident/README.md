@@ -28,10 +28,8 @@ python demo.py --source path/to/video.mp4 --device cpu
 
 This writes:
 - `out.mp4` — annotated video (track boxes + red ALERT banner on confirmed events)
-- `alerts.jsonl` — the dashboard log; one JSON record per dispatched alert
-- `recipients.json` — nearby hospitals/police stations used by the
-  control-room console for nearest-recipient routing display
-- `acks.jsonl` — operator acknowledgements from the control-room console
+- `alerts.jsonl` — the alert log; one JSON record per dispatched alert
+- `vista_clips/` — per-alert evidence clips (served by the Emergency Response dashboards)
 
 ## Validate the logic without a real video
 
@@ -66,7 +64,7 @@ exactly what a signal should and shouldn't fire on.
 | `tools/calibrate_camera.py` | Interactive + headless homography calibration (click 4+ ground-plane points with known real-world coords → config snippet + bird's-eye preview) |
 | `tools/validate_speed.py` | Speed acceptance gate: run a clip with a profile + two on-road markers, compare estimator speed vs crossing-time ground truth, report error % (±15% gate) |
 | `tools/draw_stop_zones.py` | Click-to-draw stop-zone polygons on a real frame from your camera → JSON for `--stop-zones-json` |
-| `tools/dashboard.py` | Control-room console over `alerts.jsonl` + `vista_clips/` — WebAudio siren, severity banner, clip playback, nearest-recipient routing (`recipients.json`), operator ACK (`acks.jsonl`). Stdlib-only. Works with the merged multi-camera log too |
+| `tools/dashboard.py` | **Removed (2026-08-08)** — superseded by `emergency_response/server.py`, which now hosts the dispatch UI (siren, severity banner, clip playback, ACK) directly on the hospital/police/traffic dashboards |
 | `tools/review_alerts.py` | Walk through logged alerts, label true/false positive, get a false-positive-rate-by-kind summary to actually justify threshold changes |
 | `multi_camera.py` | Runs one `AccidentPipeline` per camera concurrently, all alerts merged into one shared log/dashboard |
 
@@ -93,19 +91,17 @@ delayed for it.
 camera and lets you click-draw polygons instead of hand-editing pixel
 coordinates. Feed the result straight into `--stop-zones-json`.
 
-**Control-room console.** `python -m vista_accident.tools.dashboard --log
-alerts.jsonl --clips vista_clips` serves a big-screen dispatch console —
-stdlib only, no extra dependency. For every NEW dispatched alert it sounds
-a WebAudio siren (click ARM SIREN first — browsers block autoplay), flashes
-a severity-colored banner (kind / severity / location / coordinates /
-timestamp / camera / plate), auto-plays the per-alert clip once the pipeline
-finishes writing it (~1.5 s after dispatch), shows the nearest
-hospitals/police stations the alert is routed to (from `recipients.json`,
-matched to the severity's channels), and lets the operator ACK each alert
-(`acks.jsonl`). This is the dispatch-side display of the two-interface demo:
-the GUI (`gui_app.py`) detects, the console receives. Works unmodified with
-the merged log from `multi_camera.py` since every `AlertPayload` already
-carries its own `camera_id`.
+**Control-room console (merged into Emergency Response).** The old
+`tools/dashboard.py` console was **removed** (2026-08-08); its dispatch UI —
+WebAudio siren, severity banner, and per-alert CCTV clip playback — now lives
+directly in the Emergency Response dashboards (`emergency_response/server.py`).
+For every new ML-detected incident the hospital/police/traffic dashboards:
+flash a severity-colored banner, sound a siren once ARM'ed (browsers block
+autoplay), auto-expose the per-alert clip under `/clips/` once the pipeline
+finishes writing it (~1.5 s after dispatch), and let the operator move the
+notification through notified → acknowledged → dispatched → resolved (the ACK
+step of the old console). Works with the merged multi-camera log too, since
+every `AlertPayload` carries its own `camera_id`.
 
 **Multi-camera.** `python multi_camera.py --config cameras.json --log
 alerts.jsonl` runs one `AccidentPipeline` per camera concurrently (same
@@ -150,16 +146,20 @@ authenticity/integrity from day one. Set a real secret (env var / secrets
 manager — do not commit one) before swapping `_send_mock` for a real
 `requests.post(url, json=asdict(payload), headers={"X-Vista-Signature": sig})`.
 
-**Emergency Response dashboards (ML bridge).** Pass
+**Emergency Response dashboards (the dispatch UI).** Pass
 `--emergency-response-url http://127.0.0.1:8890/api/incidents` (GUI: the
 "Open Emergency Response" button does this automatically) and every
 dispatched alert is POSTed to the `emergency_response/` server, where it
 appears on the hospital/police/traffic police dashboards tagged **ML
 AUTO-DETECTED**, routed to the nearest 3 authorities of each type via
-Haversine. Same `AlertPayload -> incident` mapping as the citizen
-`/report` page; fire-and-forget on a background thread, so an absent
-server never affects dispatch. See `emergency_response/client.py` and its
-README for the kind→incident_type table.
+Haversine. Those dashboards are the single dispatch-side display (the old
+control-room console was merged into them): severity banner + WebAudio siren
+on new incidents, per-alert CCTV clip playback from `vista_clips/` via
+`/clips/`, and a notified → acknowledged → dispatched → resolved status
+workflow. Same `AlertPayload -> incident` mapping as the citizen `/report`
+page; fire-and-forget on a background thread, so an absent server never
+affects dispatch. See `emergency_response/client.py` and its README for the
+kind→incident_type table.
 
 ## Wiring this into the full VISTA system (accident + violence, concurrent)
 
