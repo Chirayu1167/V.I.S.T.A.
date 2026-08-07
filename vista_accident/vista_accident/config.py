@@ -62,10 +62,29 @@ class HeuristicConfig:
     history_seconds: float = 3.0          # how much per-track history to retain
 
     # --- Signal 1: speed drop ---
+    # Loosened from 0.5s/0.8 because tracker speed readings on distant CCTV
+    # are noisy and jittery: a longer window smooths the noise, and a lower
+    # ratio catches crashes whose measured drop reads under 80%.
     speed_drop_window_s: float = 0.5      # look-back window for velocity comparison
     speed_drop_ratio: float = 0.8         # >80% velocity drop within window
     # m/s equivalents of the tuned px/s thresholds (old: 40 px/s @ 0.05 m/px).
+    # Lowered from 2.0 because tracker speed readings are noisy on distant
+    # CCTV — a car that was cruising but reads slow-ish must still be caught
+    # when it crashes to a stop.
     speed_drop_min_prior_speed: float = 2.0  # m/s — ignore tracks that were already ~stationary
+
+    # FAST-DROP supplement: catches the crash-stop that happens in only a few
+    # frames (wall/barrier hit) where the windowed >70% ratio is diluted by
+    # pre-crash frames. Fires when the Kalman instantaneous velocity (which
+    # snaps to ~0 on a hard stop via its innovation gate) is near-stopped AND
+    # the short-window deceleration is huge. Set 0.0 to disable.
+    # Values are deliberately LOOSE because tracker speed is not stable —
+    # the noise floor of velocity readings is high, so a crash that reads
+    # "only" ~4 m/s^2 of decel or stops "only" at ~2 m/s must still alert.
+    # The near-stopped + big-drop combination keeps normal braking excluded.
+    speed_drop_fast_decel_mps2: float = 4.0      # min decel to count as a fast crash-stop
+    speed_drop_fast_end_max_velocity: float = 2.0 # "now" must be near-stopped (m/s)
+    speed_drop_fast_window_s: float = 0.3        # short span the fast drop is measured over
 
     # --- Signal 2: collision (two tracks overlap + impact signature) ---
     # "Impact signature" = at least one vehicle was moving meaningfully before

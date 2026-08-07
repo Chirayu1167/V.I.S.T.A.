@@ -54,19 +54,59 @@ def check_speed_drop(history: TrackHistory, t: float, cfg: HeuristicConfig,
         if p and _in_any_zone((p.cx, p.cy), stop_zones):
             continue  # legitimate braking at an intersection/bus stop — suppress
         drop_ratio = (prior_v - now_v) / prior_v
-        if drop_ratio > cfg.speed_drop_ratio:
-            # Include ML speed details if available
-            ml_speed = history.get_ml_speed(tid)
-            meta = {"prior_v": prior_v, "now_v": now_v, "drop_ratio": drop_ratio,
-                    "cx": p.cx, "cy": p.cy}
-            if ml_speed:
-                meta["ml_speed_mps"] = ml_speed.speed_mps
-                meta["ml_speed_kmph"] = ml_speed.speed_kmph
-                meta["ml_world_pos"] = ml_speed.world_pos
-            triggers.append(RawTrigger(
-                kind="speed_drop", track_ids=(tid,), t=t,
-                meta=meta,
-            ))
+        fired = drop_ratio > cfg.speed_drop_ratio
+
+        # FAST-DROP branch: speed readings from a tracker on distant CCTV are
+        # noisy, so a real wall/barrier crash-stop can collapse in only a few
+        # frames and be diluted by the windowed average below the >80% bar —
+        # exactly the accidents we must not miss. The Kalman instantaneous
+        # velocity (innovation gate re-inits on hard stops) snaps toward zero
+        # immediately, so near-stopped instantaneous + a big deceleration over
+        # a SHORT recent span is the crash signature. Thresholds are set loose
+        # on purpose (they only fire when the speed really collapsed AND the
+        # vehicle is effectively stopped), so normal gradual braking at a light
+        # doesn't qualify.
+        now_inst = None
+        decel = None
+        if not fired and cfg.speed_drop_fast_decel_mps2 > 0:
+            fw = cfg.speed_drop_fast_window_s
+            prior_recent_v = history.velocity_between(tid, t - 2 * fw, t - fw)
+            recent_v = history.velocity_between(tid, t - fw, t)
+            now_inst = history.instantaneous_velocity(tid)
+            if (prior_recent_v is not None and recent_v is not None
+                    and now_inst is not None and now_inst < prior_recent_v
+                    and prior_recent_v >= cfg.speed_drop_min_prior_speed):
+                decel = (prior_recent_v - recent_v) / fw
+                fired = (
+                    now_inst <= cfg.speed_drop_fast_end_max_velocity
+                    and decel >= cfg.speed_drop_fast_decel_mps2
+                )
+
+        if not fired:
+            continue
+        # Include ML speed details if available
+        ml_speed = history.get_ml_speed(tid)
+        # Score the fast branch with the instantaneous collapse ratio (the
+        # windowed ratio understates a fast crash-stop — that's why the
+        # windowed branch missed it).
+        if now_inst is not None and now_inst < prior_v:
+            meta_ratio = (prior_v - now_inst) / prior_v
+        else:
+            meta_ratio = drop_ratio
+        meta = {"prior_v": prior_v,
+                "now_v": now_inst if now_inst is not None else now_v,
+                "drop_ratio": meta_ratio, "cx": p.cx, "cy": p.cy}
+        if decel is not None:
+            meta["decel_mps2"] = round(decel, 2)
+            meta["fast"] = True
+        if ml_speed:
+            meta["ml_speed_mps"] = ml_speed.speed_mps
+            meta["ml_speed_kmph"] = ml_speed.speed_kmph
+            meta["ml_world_pos"] = ml_speed.world_pos
+        triggers.append(RawTrigger(
+            kind="speed_drop", track_ids=(tid,), t=t,
+            meta=meta,
+        ))
     return triggers
 
 

@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
-VISTA — Accident Detection desktop UI.
+VISTA â€” Accident Detection desktop UI.
 
 A native PyQt5 app (not a browser/HTML UI) so there's no local web-server
 round trip in the loop: video frames are decoded, run through the pipeline,
@@ -12,7 +12,7 @@ Layout:
     - Right: a scrolling incident report. Each confirmed+dispatched alert
              (above the chosen severity threshold) gets one compact card:
              severity color strip, kind/timestamp/tracks/channels, and a
-             3-shot filmstrip (before / impact / after) — click any thumb
+             3-shot filmstrip (before / impact / after) â€” click any thumb
              to view it full-size.
 
 Run:
@@ -42,14 +42,13 @@ from PyQt5.QtWidgets import (
 )
 
 from vista_accident import AccidentPipeline, CameraConfig, DispatchConfig, HeuristicConfig
-from vista_accident.camera_profile import find_profiles, load_profile, save_profile
+from vista_accident.auto_calibration import auto_calibrate_video
 from vista_accident.detector import Detector
 from vista_accident.confirmation import SecondaryConfirmation
 from vista_accident.render import SEVERITY_COLORS, SEVERITY_RANK, SpeedEstimator, draw_overlay
-from vista_accident.tools.calibrate_camera import build_homography, render_birdseye_preview
 
 # Absolute base dir of THIS file (not cwd!): the GUI can be launched from
-# anywhere (shortcut, Explorer, terminal) — the alert log, clips, screenshots
+# anywhere (shortcut, Explorer, terminal) â€” the alert log, clips, screenshots
 # and the control-room console must all anchor to the same place, otherwise
 # the console watches a different alerts.jsonl than the GUI writes and shows
 # nothing.
@@ -64,7 +63,7 @@ ALERT_PANEL_WIDTH = 400
 BEFORE_OFFSET_S = 0.6   # how far back the "before" shot is grabbed from
 AFTER_DELAY_S = 0.8     # how long after the alert the "after" shot is grabbed
 
-# Incident grouping (DISPLAY-ONLY — never suppresses a dispatch, only merges
+# Incident grouping (DISPLAY-ONLY â€” never suppresses a dispatch, only merges
 # how the SAME crash is presented). Multiple heuristic kinds of one physical
 # crash arrive a few seconds apart at the same spot (collision ->
 # speed_drop). These are grouped into a single report card with ONE
@@ -121,6 +120,7 @@ class VideoWorker(QThread):
     shot_ready = pyqtSignal(str, str)             # alert_id, after-screenshot path
     clip_ready = pyqtSignal(str, str)             # alert_id, clip path (written a few frames after dispatch)
     progress = pyqtSignal(int, int)               # frame_idx, total_frames
+    status_update = pyqtSignal(str)               # background status (e.g. auto-calibration progress)
     finished_processing = pyqtSignal(dict)        # summary stats
     error = pyqtSignal(str)
 
@@ -200,8 +200,25 @@ class VideoWorker(QThread):
                 # the ML estimator when a homography/profile is present).
                 if self.px_per_meter:
                     camera_cfg.meter_per_pixel = 1.0 / self.px_per_meter
+                detector = Detector(device=self.device)
+                if self.camera_cfg is None and not self.px_per_meter:
+                    # No profile loaded, no manual scale -> auto-calibrate the
+                    # homography in the background from THIS video's own traffic
+                    # (car bbox width fit, same model as camera_profiles/).
+                    # Runs here on the worker QThread so the UI stays free.
+                    self.status_update.emit("Auto-calibrating (scanning video)â€¦")
+                    auto_cfg = auto_calibrate_video(self.source_path, detector,
+                                                    camera_id=self.camera_id)
+                    if auto_cfg is not None:
+                        camera_cfg = auto_cfg
+                        self.status_update.emit(
+                            f"Auto-calibrated: {auto_cfg.calibration_note}")
+                    else:
+                        self.status_update.emit(
+                            "Auto-calibration skipped (too few cars) â€” using "
+                            "flat 0.05 m/px scale.")
                 pipeline = AccidentPipeline(
-                    detector=Detector(device=self.device),
+                    detector=detector,
                     heuristic_cfg=HeuristicConfig(),
                     camera_cfg=camera_cfg,
                     dispatch_cfg=DispatchConfig(dashboard_log_path=ALERTS_LOG),
@@ -385,7 +402,7 @@ class Thumb(QLabel):
             self.setPixmap(QPixmap(path))
             self.setText("")
         else:
-            self.setText("…")
+            self.setText("â€¦")
 
     def _open(self, _event):
         if not (self._path and os.path.exists(self._path)):
@@ -429,8 +446,8 @@ class AlertCard(QFrame):
 
         ts = datetime.now().strftime("%H:%M:%S")
         subtitle = QLabel(
-            f"t={payload.timestamp:.1f}s  •  tracks {payload.track_ids}  •  {ts}  •  "
-            f"→ {', '.join(c.replace('_', ' ') for c in payload.channels)}"
+            f"t={payload.timestamp:.1f}s  â€¢  tracks {payload.track_ids}  â€¢  {ts}  â€¢  "
+            f"â†’ {', '.join(c.replace('_', ' ') for c in payload.channels)}"
         )
         subtitle.setStyleSheet("color: #97979d; font-size: 10.5px;")
         subtitle.setWordWrap(True)
@@ -475,260 +492,6 @@ class AlertCard(QFrame):
         QDesktopServices.openUrl(QUrl.fromLocalFile(cpath))
 
 
-class CalibrationDialog(QDialog):
-    """
-    GUI homography calibration flow:
-
-        1. Load a frame (from a video file or image) — any frame where you
-           can see 4+ ground-plane reference points (lane edges, crosswalk
-           corners, a measured rectangle).
-        2. Click each reference point on the image; enter its real-world
-           (x, y) in meters and press "Add point". The world frame is any
-           consistent origin/axes on the ground plane (e.g. origin at one
-           corner of a marked lane, x = across the road, y = along it).
-        3. "Compute & preview" builds the homography (reuses the math from
-           tools/calibrate_camera.py) and shows the bird's-eye view — check
-           that known-straight lines look straight there.
-        4. "Save profile" writes a camera profile JSON (homography points,
-           camera id/location, calibration note) that demo.py / the GUI
-           pipeline can load directly.
-
-    A profile's homography is only as good as the reference points: pick
-    points on the ground plane (road surface), spread across the region of
-    the frame where you need accurate speeds, with distances you measured
-    or know (e.g. standard Indian lane width 3.5 m).
-    """
-
-    profile_saved = pyqtSignal(str)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Camera Calibration")
-        self.resize(1150, 720)
-        self._frame = None
-        self._points = []     # list of {"px":, "py":, "wx":, "wy":}
-        self._pending = None  # (px, py) of the last image click
-        self._H = None
-        self._build_ui()
-
-    def _build_ui(self):
-        root = QHBoxLayout(self)
-        left = QVBoxLayout()
-        right = QVBoxLayout()
-        root.addLayout(left, 3)
-        root.addLayout(right, 2)
-
-        src_row = QHBoxLayout()
-        self.src_btn = QPushButton("Load Frame (video/image)")
-        self.src_btn.clicked.connect(self.on_load_frame)
-        self.frame_spin = QSpinBox()
-        self.frame_spin.setRange(0, 100000)
-        self.frame_spin.setValue(0)
-        src_row.addWidget(self.src_btn)
-        src_row.addWidget(QLabel("Frame #"))
-        src_row.addWidget(self.frame_spin)
-        src_row.addStretch(1)
-        left.addLayout(src_row)
-
-        self.frame_view = ClickableImage("Click 4+ ground-plane points on the frame")
-        self.frame_view.clicked.connect(self.on_image_click)
-        left.addWidget(self.frame_view, 1)
-
-        self.point_label = QLabel("Points: 0 / 4+ required")
-        self.point_label.setStyleSheet("color: #8a8a90;")
-        left.addWidget(self.point_label)
-
-        hint = QLabel("World coords are in meters; pick any consistent origin/axes "
-                      "(e.g. x = across road, y = along road).")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #6f6f75; font-size: 10.5px;")
-        right.addWidget(hint)
-
-        coord_row = QHBoxLayout()
-        coord_row.addWidget(QLabel("World X (m)"))
-        self.wx_spin = QDoubleSpinBox()
-        self.wx_spin.setRange(-10000.0, 10000.0)
-        self.wx_spin.setDecimals(2)
-        coord_row.addWidget(self.wx_spin)
-        coord_row.addWidget(QLabel("World Y (m)"))
-        self.wy_spin = QDoubleSpinBox()
-        self.wy_spin.setRange(-10000.0, 10000.0)
-        self.wy_spin.setDecimals(2)
-        coord_row.addWidget(self.wy_spin)
-        self.add_btn = QPushButton("Add point")
-        self.add_btn.clicked.connect(self.on_add_point)
-        coord_row.addWidget(self.add_btn)
-        self.undo_btn = QPushButton("Undo")
-        self.undo_btn.clicked.connect(self.on_undo)
-        coord_row.addWidget(self.undo_btn)
-        right.addLayout(coord_row)
-
-        self.compute_btn = QPushButton("Compute homography + preview bird's-eye")
-        self.compute_btn.clicked.connect(self.on_compute)
-        right.addWidget(self.compute_btn)
-
-        self.preview_view = ClickableImage("Bird's-eye preview appears here")
-        self.preview_view.setMinimumSize(400, 260)
-        right.addWidget(self.preview_view, 1)
-
-        meta_box = QGroupBox("Profile metadata")
-        meta = QVBoxLayout(meta_box)
-        meta.addWidget(QLabel("Camera ID"))
-        self.camera_id_edit = QLineEdit("CAM-01")
-        meta.addWidget(self.camera_id_edit)
-        meta.addWidget(QLabel("Location"))
-        self.location_edit = QLineEdit("Unnamed camera")
-        meta.addWidget(self.location_edit)
-        mpp_row = QHBoxLayout()
-        mpp_row.addWidget(QLabel("Fallback px/m (0 = keep config default)"))
-        self.mpp_spin = QDoubleSpinBox()
-        self.mpp_spin.setRange(0.0, 500.0)
-        self.mpp_spin.setDecimals(2)
-        self.mpp_spin.setValue(0.0)
-        mpp_row.addWidget(self.mpp_spin)
-        meta.addLayout(mpp_row)
-        meta.addWidget(QLabel("Calibration note (what did you measure/assume?)"))
-        self.note_edit = QLineEdit("")
-        self.note_edit.setPlaceholderText("e.g. lane width 3.5 m (standard Indian lane) assumed")
-        meta.addWidget(self.note_edit)
-        right.addWidget(meta_box)
-
-        save_row = QHBoxLayout()
-        self.save_btn = QPushButton("Save profile JSON")
-        self.save_btn.clicked.connect(self.on_save)
-        self.use_btn = QPushButton("Use for this session")
-        self.use_btn.setEnabled(False)
-        save_row.addWidget(self.save_btn)
-        save_row.addWidget(self.use_btn)
-        right.addLayout(save_row)
-
-    def on_load_frame(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select a video or image", "",
-            "Video/Image files (*.mp4 *.avi *.mov *.mkv *.jpg *.jpeg *.png);;All files (*)"
-        )
-        if not path:
-            return
-        ext = os.path.splitext(path)[1].lower()
-        if ext in (".jpg", ".jpeg", ".png"):
-            frame = cv2.imread(path)
-        else:
-            cap = cv2.VideoCapture(path)
-            if not cap.isOpened():
-                QMessageBox.critical(self, "Error", f"Could not open: {path}")
-                return
-            cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_spin.value())
-            ok, frame = cap.read()
-            cap.release()
-            if not ok:
-                QMessageBox.critical(self, "Error", f"Could not read frame {self.frame_spin.value()} from {path}")
-                return
-        self._frame = frame
-        self._points = []
-        self._pending = None
-        self._H = None
-        self.use_btn.setEnabled(False)
-        self._refresh_points()
-        self.frame_view.set_frame(frame)
-        self.preview_view.set_frame(np.zeros((180, 320, 3), dtype=np.uint8))
-
-    def on_image_click(self, px, py):
-        self._pending = (px, py)
-        self.frame_view.set_frame(self._draw_points())
-
-    def on_add_point(self):
-        if self._frame is None:
-            return
-        if self._pending is None:
-            QMessageBox.information(self, "No point clicked",
-                                    "Click a point on the frame first, then set its world coords.")
-            return
-        self._points.append({
-            "px": self._pending[0], "py": self._pending[1],
-            "wx": self.wx_spin.value(), "wy": self.wy_spin.value(),
-        })
-        self._pending = None
-        self._H = None
-        self._refresh_points()
-        self.frame_view.set_frame(self._draw_points())
-
-    def on_undo(self):
-        if self._points:
-            self._points.pop()
-            self._H = None
-            self._refresh_points()
-            self.frame_view.set_frame(self._draw_points())
-        else:
-            self._pending = None
-            self.frame_view.set_frame(self._draw_points())
-
-    def on_compute(self):
-        if self._frame is None:
-            return
-        if len(self._points) < 4:
-            QMessageBox.warning(self, "Not enough points",
-                                "Need at least 4 ground-plane points (more is better).")
-            return
-        try:
-            raw = [(p["px"], p["py"], p["wx"], p["wy"]) for p in self._points]
-            H, src, dst = build_homography(raw)
-        except SystemExit as e:
-            QMessageBox.critical(self, "Homography failed", str(e))
-            return
-        self._H = H
-        import tempfile
-        preview_path = os.path.join(tempfile.gettempdir(), "vista_calibration_preview.png")
-        render_birdseye_preview(self._frame, H, preview_path, dst)
-        preview = cv2.imread(preview_path)
-        if preview is not None:
-            self.preview_view.set_frame(preview)
-        self.use_btn.setEnabled(True)
-
-    def on_save(self):
-        if self._frame is None:
-            return
-        if self._H is None:
-            self.on_compute()
-            if self._H is None:
-                return
-        default_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "camera_profiles")
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save camera profile", os.path.join(default_dir, "CAM-01.json"),
-            "JSON (*.json)"
-        )
-        if not path:
-            return
-        cfg = CameraConfig(
-            camera_id=self.camera_id_edit.text().strip() or "CAM-01",
-            location_name=self.location_edit.text().strip() or "Unnamed camera",
-            homography_src_points=[[p["px"], p["py"]] for p in self._points],
-            homography_dst_points=[[p["wx"], p["wy"]] for p in self._points],
-        )
-        if self.mpp_spin.value() > 0:
-            cfg.meter_per_pixel = self.mpp_spin.value()
-        note = self.note_edit.text().strip()
-        save_profile(path, cfg, calibration_note=note)
-        self.profile_saved.emit(path)
-        QMessageBox.information(
-            self, "Profile saved",
-            f"Saved to:\n{path}\n\nLoad it with Camera Profile -> Use, or "
-            f"python demo.py --camera-profile {path}"
-        )
-
-    def _draw_points(self):
-        frame = self._frame.copy()
-        for i, p in enumerate(self._points):
-            cv2.circle(frame, (p["px"], p["py"]), 5, (0, 0, 255), -1)
-            cv2.putText(frame, f"#{i+1} ({p['wx']:.2f},{p['wy']:.2f})", (p["px"] + 8, p["py"] - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-        if self._pending is not None:
-            cv2.circle(frame, self._pending, 5, (0, 255, 255), -1)
-        return frame
-
-    def _refresh_points(self):
-        self.point_label.setText(f"Points: {len(self._points)} / 4+ required")
-
-
 class ClickableImage(QLabel):
     """A QLabel that reports clicks mapped back to original-frame pixel
     coordinates (compensates for the displayed pixmap's scaling)."""
@@ -768,14 +531,13 @@ class ClickableImage(QLabel):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VISTA — Accident Detection")
+        self.setWindowTitle("VISTA â€” Accident Detection")
         self.resize(1320, 780)
         self.worker = None
         self.alert_cards = {}
         self.alert_count = 0
         self.control_proc = None
-        self.camera_cfg = None           # loaded camera profile (None = defaults)
-        self.camera_profile_path = None
+        self.camera_cfg = None           # always None now — calibration is automatic
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -807,7 +569,7 @@ class MainWindow(QMainWindow):
         self.control_room_btn = QPushButton("Open Control Room")
         self.control_room_btn.setToolTip(
             "Start the control-room console (siren + clip playback + routed "
-            "recipients) in a browser — it watches alerts.jsonl and vista_clips/"
+            "recipients) in a browser â€” it watches alerts.jsonl and vista_clips/"
         )
         self.control_room_btn.clicked.connect(self.on_open_control_room)
 
@@ -857,26 +619,10 @@ class MainWindow(QMainWindow):
         self.calib_spin.setValue(0.0)
         self.calib_spin.setToolTip(
             "Optional: real camera calibration (pixels per meter). "
-            "0 = auto-estimate speed from each object's own size."
+            "0 = auto-calibrate the homography from this video's own "
+            "car traffic (auto calibration)."
         )
         controls.addWidget(self.calib_spin)
-
-        controls.addWidget(QLabel("Profile"))
-        self.profile_combo = QComboBox()
-        self.profile_combo.addItem("(default)")
-        self.profile_combo.setToolTip(
-            "Camera calibration profiles in camera_profiles/ (homography + "
-            "stop zones + camera metadata). Pick one to run analysis with "
-            "real-world speeds."
-        )
-        self._refresh_profile_combo()
-        controls.addWidget(self.profile_combo)
-        self.profile_browse_btn = QPushButton("Browse…")
-        self.profile_browse_btn.clicked.connect(self.on_profile_browse)
-        controls.addWidget(self.profile_browse_btn)
-        self.calibrate_btn = QPushButton("Calibrate…")
-        self.calibrate_btn.clicked.connect(self.on_calibrate)
-        controls.addWidget(self.calibrate_btn)
 
         left.addWidget(controls_box)
 
@@ -935,55 +681,12 @@ class MainWindow(QMainWindow):
             return
         self.start_analysis(path)
 
-    def _refresh_profile_combo(self):
-        current = self.profile_combo.currentText() if self.profile_combo.count() else "(default)"
-        self.profile_combo.blockSignals(True)
-        self.profile_combo.clear()
-        self.profile_combo.addItem("(default)")
-        for path in find_profiles():
-            self.profile_combo.addItem(os.path.basename(path), path)
-        idx = self.profile_combo.findText(current)
-        self.profile_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        self.profile_combo.blockSignals(False)
-
-    def on_profile_browse(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select a camera profile", "camera_profiles", "JSON (*.json)"
-        )
-        if not path:
-            return
-        self._use_profile(path)
-
-    def on_calibrate(self):
-        dlg = CalibrationDialog(self)
-        dlg.profile_saved.connect(self._use_profile)
-        dlg.exec()
-
-    def _use_profile(self, path):
-        try:
-            cfg = load_profile(path)
-        except Exception as e:
-            QMessageBox.critical(self, "Profile error", str(e))
-            return
-        self.camera_cfg = cfg
-        self.camera_profile_path = path
-        idx = self.profile_combo.findText(os.path.basename(path))
-        if idx >= 0:
-            self.profile_combo.setCurrentIndex(idx)
-        else:
-            self._refresh_profile_combo()
-        n = len(cfg.homography_src_points)
-        self.status_label.setText(
-            f"Camera profile: {os.path.basename(path)} (camera={cfg.camera_id}, "
-            f"homography points={n})"
-        )
-
     def start_analysis(self, path):
         if not (self.accident_check.isChecked() or self.violence_check.isChecked()):
             QMessageBox.warning(
                 self, "Nothing selected",
                 "Tick at least one detection branch (accident and/or violence) "
-                "before uploading — nothing would be analyzed otherwise.")
+                "before uploading â€” nothing would be analyzed otherwise.")
             return
         if self.worker and self.worker.isRunning():
             self.worker.stop()
@@ -1012,6 +715,7 @@ class MainWindow(QMainWindow):
         self.worker.shot_ready.connect(self.on_shot_ready)
         self.worker.clip_ready.connect(self.on_clip_ready)
         self.worker.progress.connect(self.on_progress)
+        self.worker.status_update.connect(self.on_status_update)
         self.worker.finished_processing.connect(self.on_finished)
         self.worker.error.connect(self.on_error)
         self.worker.start()
@@ -1032,7 +736,7 @@ class MainWindow(QMainWindow):
         """Launch the control-room console server (if not already running)
         and open it in the default browser. The console is a separate process
         that watches the SAME absolute alerts.jsonl + vista_clips/ this GUI
-        writes to — the two-interface demo flow (this GUI detects, the
+        writes to â€” the two-interface demo flow (this GUI detects, the
         console displays with siren/clip). The console is spawned detached
         with an explicit cwd so it works no matter where the GUI itself was
         launched from, and it outlives this window."""
@@ -1049,7 +753,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _control_room_running():
-        """True if something already listens on the console port — a stale
+        """True if something already listens on the console port â€” a stale
         server started earlier would otherwise steal the port and a second
         spawn would die silently, leaving the browser on the wrong instance."""
         import socket
@@ -1095,10 +799,13 @@ class MainWindow(QMainWindow):
         else:
             self.progress_bar.setMaximum(0)  # indeterminate
 
+    def on_status_update(self, message):
+        self.status_label.setText(message)
+
     def on_finished(self, summary):
         clips = summary.get("clips_saved", 0)
         self.status_label.setText(
-            f"Done — {summary['frames']} frames processed, "
+            f"Done â€” {summary['frames']} frames processed, "
             f"{summary['confirmed']} confirmed, {summary['dispatched']} dispatched, "
             f"{clips} clip(s) saved to {CLIP_DIR}."
         )
@@ -1108,7 +815,7 @@ class MainWindow(QMainWindow):
 
     def on_error(self, message):
         QMessageBox.critical(self, "Analysis error", message)
-        self.status_label.setText("Error — see dialog.")
+        self.status_label.setText("Error â€” see dialog.")
         self.pause_btn.setEnabled(False)
         self.stop_btn.setEnabled(False)
         self.upload_btn.setEnabled(True)
@@ -1117,7 +824,7 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait()
-        # NOTE: the control-room console is deliberately left running — it's
+        # NOTE: the control-room console is deliberately left running â€” it's
         # an independent display (big-screen demo), and the port-busy check
         # in on_open_control_room prevents duplicate servers.
         event.accept()

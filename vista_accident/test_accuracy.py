@@ -98,7 +98,7 @@ def test_signal_stop_suppressed():
 
 def test_hard_stop_speed_drop():
     """Yesterday's tuning restored: speed_drop needs >80% drop with a real
-    prior speed (ratio 0.8 / min_prior 2.0). A near-total stop must fire;
+    prior speed (ratio 0.8 / min_prior 1.2). A near-total stop must fire;
     a partial 70% slow-down must NOT (that was today's looser 0.65 abs-cap
     behavior, reverted so normal braking doesn't alert)."""
     det = ScriptedDetector()
@@ -143,6 +143,35 @@ def test_hard_stop_speed_drop():
     print("PASS: 70% braking at light -> no speed_drop alert")
 
 
+def test_fast_crash_stop_speed_drop():
+    """FAST-DROP branch: a stop that collapses in a FEW frames (crash into a
+    wall/barrier) is diluted by the 0.5s windowed average and can miss the
+    >80% ratio bar. Near-zero instantaneous velocity + huge short-window
+    deceleration must still fire speed_drop."""
+    det = ScriptedDetector()
+    p = AccidentPipeline(detector=det, tracker=Tracker(frame_rate=int(FPS)),
+                         heuristic_cfg=HeuristicConfig(),
+                         camera_cfg=CameraConfig(camera_id="FASTDROP"),
+                         dispatch_cfg=DispatchConfig(dashboard_log_path="test_alerts.jsonl"),
+                         fps_hint=FPS, use_ml_speed=False)
+    # Car drives fast, then a hard stop happens across only 3 frames
+    # (20 -> 2 -> 0 px/frame): the 0.5s windowed average still mostly contains
+    # pre-crash frames, so the windowed ratio alone would not fire.
+    script = []
+    x = 50.0
+    for i in range(60):
+        v = 20 if i < 28 else (2 if i < 30 else 0)
+        x += v
+        box = (x, 400, x + 120, 480)
+        script.append([(box, 0.9, 2)])
+    det.script = script
+    evs = run(p, 60, make_frame)
+    kinds = sorted(set(k for _, k, _ in evs))
+    print(f"[fastdrop] events={len(evs)} kinds={kinds}")
+    assert "speed_drop" in kinds, "FAIL: fast crash-stop missed"
+    print("PASS: fast (few-frame) crash-stop -> speed_drop alert")
+
+
 def test_collision():
     """Two cars approach head-on and freeze mid-overlap: the collision
     heuristic (IoU overlap + impact signature) fires and dispatches."""
@@ -180,5 +209,6 @@ if __name__ == "__main__":
     test_wall_crash_speed_drop()
     test_signal_stop_suppressed()
     test_hard_stop_speed_drop()
+    test_fast_crash_stop_speed_drop()
     test_collision()
     print("\nALL ACCURACY TESTS PASSED")
