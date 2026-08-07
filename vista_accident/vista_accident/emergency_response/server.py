@@ -289,6 +289,15 @@ def render_dashboard_page(authority_type):
 
     function sevClass(sev) {{ return 'sev-' + (sev || 'low'); }}
 
+    function renderSource(r) {{
+      const meta = r.meta || {{}};
+      if (meta.threshold === 'ml_detected') {{
+        return '<span class="status-pill status-dispatched">ML AUTO-DETECTED</span> ' +
+               (meta.kind ? '<span class="status-pill">' + meta.kind.replace('_',' ') + '</span>' : '');
+      }}
+      return '<span class="status-pill">Citizen report</span>';
+    }}
+
     async function loadIncidents() {{
       const authorityId = document.getElementById('authoritySelect').value;
       let url = '/api/incidents?authority_type=' + AUTHORITY_TYPE;
@@ -307,6 +316,7 @@ def render_dashboard_page(authority_type):
           <div class="top"><span class="kind">${{r.incident_type.replace('_',' ')}}</span>
           <span class="sev-${{r.severity||'low'}}">${{(r.severity||'unknown').toUpperCase()}}</span></div>
           <div class="meta">
+            ${{renderSource(r)}}<br>
             Incident ${{r.incident_id}} &middot; ${{dt}}<br>
             GPS: ${{r.lat.toFixed(5)}}, ${{r.lon.toFixed(5)}} &middot; ${{r.distance_km.toFixed(2)}} km from ${{r.authority_name}}<br>
             <span class="status-pill status-${{r.status}}">${{r.status}}</span>

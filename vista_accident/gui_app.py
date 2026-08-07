@@ -59,6 +59,14 @@ CLIP_DIR = os.path.join(BASE_DIR, "vista_clips")  # per-alert clips (pre/post im
 RECIPIENTS_PATH = os.path.join(BASE_DIR, "recipients.json")
 ACKS_PATH = os.path.join(BASE_DIR, "acks.jsonl")
 CONTROL_ROOM_URL = "http://localhost:8787"
+# Emergency Response server bridge: when the "Open Emergency Response"
+# button has started the server, dispatched alerts are POSTed to it so the
+# hospital/police/traffic dashboards show ML-detected incidents (None =
+# disabled, forwarder off). Started automatically by
+# on_open_emergency_response; nothing to configure manually.
+EMERGENCY_RESPONSE_URL = None
+EMERGENCY_PORT = 8890
+EMERGENCY_BASE_URL = f"http://127.0.0.1:{EMERGENCY_PORT}"
 ALERT_PANEL_WIDTH = 400
 BEFORE_OFFSET_S = 0.6   # how far back the "before" shot is grabbed from
 AFTER_DELAY_S = 0.8     # how long after the alert the "after" shot is grabbed
@@ -221,7 +229,8 @@ class VideoWorker(QThread):
                     detector=detector,
                     heuristic_cfg=HeuristicConfig(),
                     camera_cfg=camera_cfg,
-                    dispatch_cfg=DispatchConfig(dashboard_log_path=ALERTS_LOG),
+                    dispatch_cfg=DispatchConfig(dashboard_log_path=ALERTS_LOG,
+                                                emergency_response_url=EMERGENCY_RESPONSE_URL),
                     secondary=SecondaryConfirmation(weights_path=None, device=self.device),
                     fps_hint=fps,
                     clip_dir=self.clip_dir,
@@ -233,7 +242,8 @@ class VideoWorker(QThread):
                 from vista_accident.violence_pipeline import ViolencePipeline
                 violence_pipeline = ViolencePipeline(
                     camera_cfg=CameraConfig(camera_id=self.camera_id, location_name=self.location),
-                    dispatch_cfg=DispatchConfig(dashboard_log_path=ALERTS_LOG),
+                    dispatch_cfg=DispatchConfig(dashboard_log_path=ALERTS_LOG,
+                                                emergency_response_url=EMERGENCY_RESPONSE_URL),
                     device=self.device,
                     fps_hint=fps,
                     clip_dir=self.clip_dir,
@@ -573,10 +583,20 @@ class MainWindow(QMainWindow):
         )
         self.control_room_btn.clicked.connect(self.on_open_control_room)
 
+        self.emergency_btn = QPushButton("Open Emergency Response")
+        self.emergency_btn.setToolTip(
+            "Start the Emergency Response server (hospital / police / traffic "
+            "police dashboards). Each detected alert is then also posted there "
+            "so the dashboards show ML-detected incidents + nearest-authority "
+            "routing."
+        )
+        self.emergency_btn.clicked.connect(self.on_open_emergency_response)
+
         controls.addWidget(self.upload_btn)
         controls.addWidget(self.pause_btn)
         controls.addWidget(self.stop_btn)
         controls.addWidget(self.control_room_btn)
+        controls.addWidget(self.emergency_btn)
         controls.addStretch(1)
 
         controls.addWidget(QLabel("Device"))
@@ -759,6 +779,34 @@ class MainWindow(QMainWindow):
         import socket
         try:
             with socket.create_connection(("127.0.0.1", 8787), timeout=0.5):
+                return True
+        except OSError:
+            return False
+
+    def on_open_emergency_response(self):
+        """Start the Emergency Response server (hospital/police/traffic
+        dashboards) and enable the alert forwarder. Started detached so it
+        outlives this window; a second click uses the running instance."""
+        if not self._emergency_running():
+            flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+            subprocess.Popen(
+                [sys.executable, "-m", "vista_accident.emergency_response.server",
+                 "--port", str(EMERGENCY_PORT)],
+                cwd=BASE_DIR,
+                creationflags=flags,
+            )
+        global EMERGENCY_RESPONSE_URL
+        EMERGENCY_RESPONSE_URL = f"{EMERGENCY_BASE_URL}/api/incidents"
+        self.status_label.setText(
+            f"Emergency Response server started â€” alerts will appear on the "
+            f"hospital/police/traffic dashboards.")
+        QDesktopServices.openUrl(QUrl(EMERGENCY_BASE_URL))
+
+    @staticmethod
+    def _emergency_running():
+        import socket
+        try:
+            with socket.create_connection(("127.0.0.1", EMERGENCY_PORT), timeout=0.5):
                 return True
         except OSError:
             return False

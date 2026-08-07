@@ -81,6 +81,12 @@ def main():
                      help="Optional JSON file (see vista_accident.config.ConfigWatcher) to "
                           "hot-reload heuristic thresholds / stop_zones from during the run, "
                           "without restarting — useful for live threshold tuning.")
+    ap.add_argument("--emergency-response-url", default=None,
+                    help="Optional Emergency Response server endpoint (e.g. "
+                         "http://127.0.0.1:8890/api/incidents). Each dispatched "
+                         "alert is POSTed there so the hospital/police/traffic "
+                         "dashboards show ML-detected incidents. Runs "
+                         "python -m vista_accident.emergency_response.server first.")
     args = ap.parse_args()
 
     cap = cv2.VideoCapture(args.source)
@@ -137,7 +143,8 @@ def main():
             detector=Detector(device=args.device),
             heuristic_cfg=heuristic_cfg,
             camera_cfg=camera_cfg,
-            dispatch_cfg=DispatchConfig(dashboard_log_path="alerts.jsonl"),
+            dispatch_cfg=DispatchConfig(dashboard_log_path="alerts.jsonl",
+                                        emergency_response_url=args.emergency_response_url),
             secondary=SecondaryConfirmation(weights_path=args.secondary_weights, device=args.device),
             fps_hint=fps,
             clip_dir=args.clip_dir,
@@ -149,7 +156,8 @@ def main():
         from vista_accident.violence_pipeline import ViolencePipeline
         violence_pipeline = ViolencePipeline(
             camera_cfg=camera_cfg,
-            dispatch_cfg=DispatchConfig(dashboard_log_path="alerts.jsonl"),
+            dispatch_cfg=DispatchConfig(dashboard_log_path="alerts.jsonl",
+                                        emergency_response_url=args.emergency_response_url),
             device=args.device,
             fps_hint=fps,
             clip_dir=args.clip_dir,

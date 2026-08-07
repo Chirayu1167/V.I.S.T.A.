@@ -24,6 +24,16 @@ from .config import CameraConfig, DispatchConfig
 from .severity import CHANNELS_BY_SEVERITY
 from .verification import ConfirmedEvent
 
+# Lazy import (network I/O): the Emergency Response bridge is optional — it
+# is only enabled when DispatchConfig.emergency_response_url is set, and its
+# never-raise client keeps a dead server from ever breaking the alert path.
+def _forward_to_emergency(payload, url):
+    try:
+        from .emergency_response import client as er_client
+        er_client.post_incident(payload, endpoint=url)
+    except Exception as e:  # import/build/mapping issues — swallow, never block
+        print(f"[AlertDispatcher] emergency_response forward failed: {e}")
+
 
 # Fallback static routing when no dynamic severity override is provided.
 SEVERITY_BY_KIND = {
@@ -95,6 +105,17 @@ class AlertDispatcher:
         self._log_thread = threading.Thread(target=self._log_worker, daemon=True)
         self._log_thread.start()
 
+        # Optional async forwarder to the Emergency Response server
+        # (POST /api/incidents). Runs on its own daemon thread so a slow or
+        # unreachable emergency server can never delay alert dispatch or
+        # dashboard logging. Enabled only when the URL is configured.
+        self.emergency_url = getattr(dispatch_cfg, "emergency_response_url", None)
+        self._em_queue: "queue.Queue" = queue.Queue()
+        self._em_thread: Optional[threading.Thread] = None
+        if self.emergency_url:
+            self._em_thread = threading.Thread(target=self._emergency_worker, daemon=True)
+            self._em_thread.start()
+
     def build_and_dispatch(self, event: ConfirmedEvent, secondary_result: dict,
                             clip_path: Optional[str] = None,
                             severity: Optional[str] = None) -> AlertPayload:
@@ -137,6 +158,8 @@ class AlertDispatcher:
 
         # Never let logging block dispatch — enqueue and return immediately.
         self._log_queue.put(("sent", payload))
+        if self._em_thread is not None:
+            self._em_queue.put(payload)
         return payload
 
     def _check_rate_limit(self, t: float) -> bool:
@@ -191,6 +214,15 @@ class AlertDispatcher:
                 f.flush()
                 self._log_queue.task_done()
 
+    def _emergency_worker(self):
+        while True:
+            payload = self._em_queue.get()
+            if payload is _SHUTDOWN:
+                self._em_queue.task_done()
+                break
+            _forward_to_emergency(payload, self.emergency_url)
+            self._em_queue.task_done()
+
     def close(self, timeout: Optional[float] = 5.0):
         """Drain the log queue and stop the background thread cleanly.
 
@@ -202,3 +234,6 @@ class AlertDispatcher:
         """
         self._log_queue.put(_SHUTDOWN)
         self._log_thread.join(timeout=timeout)
+        if self._em_thread is not None:
+            self._em_queue.put(_SHUTDOWN)
+            self._em_thread.join(timeout=timeout)

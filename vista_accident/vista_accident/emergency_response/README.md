@@ -44,6 +44,43 @@ Then open:
 Open a dashboard in one tab and `/report` in another to watch an incident
 appear on the dashboard within a few seconds (dashboards poll every 8s).
 
+## Wiring ML-detected accidents into the dashboards
+
+The ML pipeline can also push into this server, so a real detected crash
+appears on the same dashboards as a manual report (tagged **ML
+AUTO-DETECTED**, kind shown). It reuses the identical `POST /api/incidents`
+endpoint; the server-side nearest-3-per-authority routing is unchanged.
+
+```bash
+# terminal 1 — start the Emergency Response server
+python -m vista_accident.emergency_response.server --port 8890
+
+# terminal 2 — run the detector with the bridge enabled
+# (each dispatched alert is POSTed to the server on a background thread)
+python demo.py --source path/to/video.mp4 \
+    --emergency-response-url http://127.0.0.1:8890/api/incidents
+```
+
+`AlertPayload` -> incident mapping (`vista_accident/emergency_response/client.py`):
+
+| AlertPayload.kind | incident_type |
+|---|---|
+| collision / speed_drop / anomaly_stop | accident |
+| hit_and_run | hit_and_run |
+| violence / road_rage | road_rage |
+
+The mapping carries the full meta (alert id, track ids, camera id, per-track
+ML speeds, confidence, clip path) plus `severity_bundled` when the  rate
+limiter collapsed a burst. The forward is fire-and-forget on its own daemon
+thread with a 2 s timeout — a missing/stopped server never delays or breaks
+the alert path (failures are printed and swallowed, identical to the mock
+webhook dispatch). Enable via `DispatchConfig.emergency_response_url`.
+
+**GUI:** the "Open Emergency Response" button starts this server and
+automatically switches the GUI's pipelines to forward to it — the demo flow
+is upload video -> click the button -> every detected crash shows up on the
+live dashboards.
+
 ## Data model (SQLite)
 
 - `authorities(id, type, name, lat, lon, address, contact)` — seeded on
@@ -75,9 +112,7 @@ appear on the dashboard within a few seconds (dashboards poll every 8s).
   Leaflet library from a CDN, loaded client-side by the browser; no API key
   is required.
 - This module is independent of `AccidentPipeline` / `gui_app.py` / the
-  ML detection pipeline. It's meant to demonstrate the citizen-report →
-  nearest-authority → dashboard workflow end to end; wiring an actual
-  confirmed ML alert (`alert.py`'s `AlertPayload`) into `POST
-  /api/incidents` instead of manual browser reporting is a small, separate
-  follow-up (map `AlertPayload.lat/lon/timestamp/kind/severity` onto the
-  same endpoint).
+  ML detection pipeline. The ML branch can OPTIONALLY push confirmed
+  alerts into it (see "Wiring ML-detected accidents" above) — same
+  `POST /api/incidents`, automatic `AlertPayload` -> `meta.threshold =
+  "ml_detected"` tagging.

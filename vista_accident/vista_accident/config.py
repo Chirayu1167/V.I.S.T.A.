@@ -301,6 +301,16 @@ class DispatchConfig:
     police_control_room_webhook: str = "mock://police-control-room/alert"
     dashboard_log_path: str = "alerts.jsonl"
 
+    # --- Emergency Response server bridge (see emergency_response/) ---
+    # Every dispatched alert is also POSTed to this Emergency Response
+    # server's /api/incidents endpoint, so an ML-detected crash shows up on
+    # the hospital/police/traffic-police dashboards alongside manual /report
+    # incidents (nearest-authority routing via Haversine happens server-side).
+    # Forwarding is fire-and-forget on a background thread — an absent server
+    # never delays or breaks dispatch. Leave None to disable (default: no
+    # server, identical behavior to before).
+    emergency_response_url: Optional[str] = None
+
     # --- Global rate limiting (per camera) ---
     # If more than rate_limit_max_alerts dispatch within rate_limit_window_s,
     # further alerts in that window are bundled: channels collapse to

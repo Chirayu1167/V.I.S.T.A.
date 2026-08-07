@@ -147,8 +147,19 @@ collapsed. Set to `0` to disable.
 **Payload signing.** Every mock-dispatched payload is now HMAC-SHA256
 signed (`DispatchConfig.hmac_secret`) so real endpoints can verify
 authenticity/integrity from day one. Set a real secret (env var / secrets
-manager — do not commit one) before swapping `_send_mock` for a live
+manager — do not commit one) before swapping `_send_mock` for a real
 `requests.post(url, json=asdict(payload), headers={"X-Vista-Signature": sig})`.
+
+**Emergency Response dashboards (ML bridge).** Pass
+`--emergency-response-url http://127.0.0.1:8890/api/incidents` (GUI: the
+"Open Emergency Response" button does this automatically) and every
+dispatched alert is POSTed to the `emergency_response/` server, where it
+appears on the hospital/police/traffic police dashboards tagged **ML
+AUTO-DETECTED**, routed to the nearest 3 authorities of each type via
+Haversine. Same `AlertPayload -> incident` mapping as the citizen
+`/report` page; fire-and-forget on a background thread, so an absent
+server never affects dispatch. See `emergency_response/client.py` and its
+README for the kind→incident_type table.
 
 ## Wiring this into the full VISTA system (accident + violence, concurrent)
 
