@@ -73,6 +73,8 @@ button { background:#2c2c33; color:#e7e7ea; border:1px solid #3d3d45; border-rad
 button:hover { background:#35353d; }
 button.primary { background:#2e5da0; border-color:#3d78c9; font-weight:600; }
 button.primary:hover { background:#3568b5; }
+button.danger { background:#7a2e2e; border-color:#a04a4a; font-weight:600; }
+button.danger:hover { background:#8c3535; }
 button:disabled { opacity:.4; cursor:default; }
 select, input { background:#1b1d24; color:#e7e7ea; border:1px solid #3d3d45; border-radius:5px; padding:7px 10px; font-size:13px; }
 label { font-size:12px; color:#9a9da6; display:block; margin:10px 0 4px; }
@@ -283,6 +285,20 @@ def render_dashboard_page(authority_type):
       <label>Filter by station</label>
       <select id="authoritySelect"><option value="">All {label} stations</option></select>
     </div>
+    <div class="panel" style="margin-bottom:14px; display:flex; gap:14px; align-items:flex-end; flex-wrap:wrap">
+      <div>
+        <label>Show incidents within</label>
+        <select id="ageSelect">
+          <option value="0">Any time</option>
+          <option value="900">Last 15 min</option>
+          <option value="3600">Last 1 hour</option>
+          <option value="86400">Last 24 hours</option>
+        </select>
+      </div>
+      <div style="margin-left:auto">
+        <button id="clearBtn" class="danger" title="Delete all incidents and notifications from every dashboard">Clear all incidents</button>
+      </div>
+    </div>
     <div id="clipBox" style="display:none">
       <video id="video" controls muted></video>
       <button class="close" id="clipClose">✕ Close clip</button>
@@ -412,8 +428,10 @@ def render_dashboard_page(authority_type):
 
     async function loadIncidents() {{
       const authorityId = document.getElementById('authoritySelect').value;
+      const maxAge = document.getElementById('ageSelect').value;
       let url = '/api/incidents?authority_type=' + AUTHORITY_TYPE;
       if (authorityId) url += '&authority_id=' + authorityId;
+      if (maxAge) url += '&max_age=' + maxAge;
       const res = await fetch(url);
       const rows = await res.json();
       clearIncidentMarkers();
@@ -480,6 +498,15 @@ def render_dashboard_page(authority_type):
     }}
 
     document.getElementById('authoritySelect').addEventListener('change', loadIncidents);
+    document.getElementById('ageSelect').addEventListener('change', loadIncidents);
+    document.getElementById('clearBtn').addEventListener('click', async () => {{
+      if (!confirm('Clear ALL incidents from every dashboard? This cannot be undone.')) return;
+      const res = await fetch('/api/incidents/clear', {{method:'POST'}});
+      if (!res.ok) return alert('Failed to clear incidents.');
+      const data = await res.json();
+      loadIncidents();
+      alert('Cleared ' + data.removed + ' incident(s). All dashboards are now clean.');
+    }});
     loadAuthorities().then(loadIncidents);
     setInterval(loadIncidents, 8000);
     </script>
@@ -554,9 +581,17 @@ class Handler(BaseHTTPRequestHandler):
             authority_id = qs.get("authority_id", [None])[0]
             if not authority_type or authority_type not in AUTHORITY_TYPES:
                 return self._send_json(400, {"error": "authority_type is required (hospital|police|traffic_police)"})
+            max_age_s = None
+            raw_age = qs.get("max_age", [None])[0]
+            if raw_age:
+                try:
+                    max_age_s = float(raw_age)
+                except ValueError:
+                    max_age_s = None
             with db.connect(self.db_path) as conn:
                 rows = [self._augment_incident(r) for r in
-                        db.list_incidents_for_authority(conn, authority_type, authority_id)]
+                        db.list_incidents_for_authority(conn, authority_type, authority_id,
+                                                        max_age_s=max_age_s)]
                 return self._send_json(200, rows)
 
         if path.startswith("/clips/"):
@@ -649,6 +684,12 @@ class Handler(BaseHTTPRequestHandler):
 
                 incident = db.get_incident(conn, incident_id)
             return self._send_json(201, incident)
+
+        if parsed.path == "/api/incidents/clear":
+            # Demo 'clean slate' button: wipe every incident + notification.
+            with db.connect(self.db_path) as conn:
+                removed = db.clear_incidents(conn)
+            return self._send_json(200, {"removed": removed})
 
         return self._send(404, "Not found")
 

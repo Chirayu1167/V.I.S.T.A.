@@ -142,9 +142,11 @@ def get_incident(conn, incident_id: str):
     return incident
 
 
-def list_incidents_for_authority(conn, authority_type: str, authority_id: str = None):
+def list_incidents_for_authority(conn, authority_type: str, authority_id: str = None,
+                                 max_age_s: float = None):
     """Incidents routed to a given authority type (optionally one specific
-    authority), newest first — what a dashboard renders."""
+    authority), newest first — what a dashboard renders. Pass max_age_s to
+    only return incidents newer than that many seconds (no limit if None)."""
     params = [authority_type]
     query = """
         SELECT n.id AS notification_id, n.distance_km, n.notified_at, n.status,
@@ -159,6 +161,9 @@ def list_incidents_for_authority(conn, authority_type: str, authority_id: str = 
     if authority_id:
         query += " AND n.authority_id = ?"
         params.append(authority_id)
+    if max_age_s:
+        params.append(time.time() - max_age_s)
+        query += " AND i.timestamp >= ?"
     query += " ORDER BY i.timestamp DESC"
     rows = conn.execute(query, params).fetchall()
     out = []
@@ -174,6 +179,16 @@ def update_notification_status(conn, notification_id: int, status: str) -> bool:
         "UPDATE notifications SET status = ? WHERE id = ?", (status, notification_id)
     )
     return cur.rowcount > 0
+
+
+def clear_incidents(conn) -> int:
+    """Delete every incident + its notifications. Returns the number of
+    incidents removed (for a demo this is the 'start from a clean slate'
+    button)."""
+    n = conn.execute("SELECT COUNT(*) AS n FROM incidents").fetchone()["n"]
+    conn.execute("DELETE FROM notifications")
+    conn.execute("DELETE FROM incidents")
+    return n
 
 
 def new_incident_id(conn) -> str:
