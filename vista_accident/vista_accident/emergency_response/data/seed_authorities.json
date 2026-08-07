@@ -1,0 +1,19 @@
+[
+  {"id": "HOSP-01", "type": "hospital", "name": "Bombay Hospital Indore", "lat": 22.7261, "lon": 75.8710, "address": "Ring Road, Indore, MP", "contact": "+91-731-2547979"},
+  {"id": "HOSP-02", "type": "hospital", "name": "Choithram Hospital Indore", "lat": 22.6975, "lon": 75.8666, "address": "Manik Bagh Road, Indore, MP", "contact": "+91-731-2432000"},
+  {"id": "HOSP-03", "type": "hospital", "name": "Aurobindo Hospital Indore", "lat": 22.7399, "lon": 75.8803, "address": "MR-10 Crossing, Indore, MP", "contact": "+91-731-4215500"},
+  {"id": "HOSP-04", "type": "hospital", "name": "CHL Hospital Indore", "lat": 22.7115, "lon": 75.8480, "address": "AB Road, Indore, MP", "contact": "+91-731-6633333"},
+  {"id": "HOSP-05", "type": "hospital", "name": "Apollo Hospital Indore", "lat": 22.7532, "lon": 75.8937, "address": "Vijay Nagar, Indore, MP", "contact": "+91-731-6673666"},
+
+  {"id": "PS-01", "type": "police", "name": "Sanyogitaganj Police Station", "lat": 22.7216, "lon": 75.8626, "address": "Sanyogitaganj, Indore, MP", "contact": "+91-731-2431111"},
+  {"id": "PS-02", "type": "police", "name": "Pardeshipura Police Station", "lat": 22.7132, "lon": 75.8731, "address": "Pardeshipura, Indore, MP", "contact": "+91-731-2461111"},
+  {"id": "PS-03", "type": "police", "name": "Vijay Nagar Police Station", "lat": 22.7521, "lon": 75.8930, "address": "Vijay Nagar, Indore, MP", "contact": "+91-731-2551111"},
+  {"id": "PS-04", "type": "police", "name": "Palasia Police Station", "lat": 22.7245, "lon": 75.8877, "address": "Palasia, Indore, MP", "contact": "+91-731-2544444"},
+  {"id": "PS-05", "type": "police", "name": "Bhanwarkuan Police Station", "lat": 22.6960, "lon": 75.8790, "address": "Bhanwarkuan, Indore, MP", "contact": "+91-731-2477777"},
+
+  {"id": "TP-01", "type": "traffic_police", "name": "Indore Traffic Police HQ", "lat": 22.7185, "lon": 75.8693, "address": "MG Road, Indore, MP", "contact": "+91-731-2411111"},
+  {"id": "TP-02", "type": "traffic_police", "name": "Traffic Police Post - MR-10", "lat": 22.7420, "lon": 75.8790, "address": "MR-10, Indore, MP", "contact": "+91-731-2422222"},
+  {"id": "TP-03", "type": "traffic_police", "name": "Traffic Police Post - Rajwada", "lat": 22.7180, "lon": 75.8556, "address": "Rajwada, Indore, MP", "contact": "+91-731-2433333"},
+  {"id": "TP-04", "type": "traffic_police", "name": "Traffic Police Post - Bypass", "lat": 22.6890, "lon": 75.8990, "address": "Indore Bypass, Indore, MP", "contact": "+91-731-2444444"},
+  {"id": "TP-05", "type": "traffic_police", "name": "Traffic Police Post - Vijay Nagar", "lat": 22.7545, "lon": 75.8955, "address": "Vijay Nagar Square, Indore, MP", "contact": "+91-731-2455555"}
+]
