@@ -586,9 +586,11 @@ class MainWindow(QMainWindow):
         controls.addStretch(1)
 
         controls.addWidget(QLabel("Device"))
-        self.device_combo = QComboBox()
-        self.device_combo.addItems(["cpu", "cuda"])
-        controls.addWidget(self.device_combo)
+        self.device_label = QLabel("cuda (GPU) — forced")
+        self.device_label.setToolTip(
+            "GPU/CUDA is required — the models lag badly on CPU."
+        )
+        controls.addWidget(self.device_label)
 
         self.accident_check = QCheckBox("Accident detection (yolo11m)")
         self.accident_check.setChecked(True)
@@ -709,7 +711,7 @@ class MainWindow(QMainWindow):
         px_per_meter = self.calib_spin.value() or None
         self.worker = VideoWorker(
             source_path=path,
-            device=self.device_combo.currentText(),
+            device="cuda",
             px_per_meter=px_per_meter,
             min_severity=self.severity_combo.currentText(),
             run_accident=self.accident_check.isChecked(),
