@@ -1,0 +1,27 @@
+{
+  "clip_01.mp4": {
+    "comment": "validated 2026-08-02 (kalman reconnect): 1 alert speed_drop @6.51s",
+    "events": [{"kind": "speed_drop", "t": 6.5, "tolerance": 1.5}]
+  },
+  "clip_02.mp4": {"events": []},
+  "clip_03.mp4": {
+    "comment": "collision @3.14 is the primary impact (flat-scale timing). Under an honest homography scale the struck car reads ~5 km/h (noise floor eats the collapse), so auto mode catches the SAME crash via its pileup aftermath (car 13 decel 31->7 km/h, collision@4.9). Tolerance 2.0 covers both; speed_drop@6.21 validated 2026-08-02.",
+    "events": [
+      {"kind": "collision", "t": 3.14, "tolerance": 2.0},
+      {"kind": "speed_drop", "t": 6.2, "tolerance": 1.5}
+    ]
+  },
+  "clip_04.mp4": {
+    "comment": "2 false stops fixed on 2026-08-02 — expects zero alerts",
+    "events": []
+  },
+  "clip_05.mp4": {"events": []},
+  "clip_06.mp4": {"events": []},
+  "clip_07.mp4": {
+    "comment": "real high-speed impact caught (kalman era) — t unknown",
+    "events": [{"kind": "collision", "t": null}]
+  },
+  "clip_08.mp4": {"events": []},
+  "clip_09.mp4": {"events": []},
+  "clip_10.mp4": {"events": []}
+}

@@ -17,11 +17,12 @@ import cv2
 import numpy as np
 
 from .alert import AlertDispatcher
-from .config import CameraConfig, DispatchConfig, HeuristicConfig
+from .config import (HOMOGRAPHY_THRESHOLD_SCALE, CameraConfig, DispatchConfig,
+                     HeuristicConfig, scale_thresholds)
 from .confirmation import SecondaryConfirmation
 from .detector import Detector
 from .fusion import IncidentFuser
-from .heuristics import run_all_heuristics
+from .heuristics import CollisionEvidence, run_all_heuristics
 from .plate_reader import PlateReader
 from .severity import SeverityAssessor, SeverityConfig
 from .speed_estimator import create_speed_estimator_from_config
@@ -45,11 +46,23 @@ class AccidentPipeline:
                  clip_dir: Optional[str] = None,
                  clip_pre_seconds: float = 2.0,
                  clip_post_seconds: float = 1.5,
-                 plate_reader: Optional[PlateReader] = None):
+                 plate_reader: Optional[PlateReader] = None,
+                 threshold_scale: Optional[float] = None):
         self.cfg = heuristic_cfg or HeuristicConfig()
         self.camera_cfg = camera_cfg or CameraConfig()
         self.dispatch_cfg = dispatch_cfg or DispatchConfig()
         self.fps_hint = fps_hint
+
+        # Re-anchor thresholds: homography speeds read systematically lower
+        # than the flat 0.05 m/px scale the defaults were tuned on, so when a
+        # fitted homography is present the physical-velocity thresholds are
+        # multiplied by HOMOGRAPHY_THRESHOLD_SCALE (see config.py docstring).
+        if threshold_scale is None:
+            has_homography = bool(getattr(self.camera_cfg, "homography_src_points", None)
+                                  and getattr(self.camera_cfg, "homography_dst_points", None))
+            threshold_scale = HOMOGRAPHY_THRESHOLD_SCALE if has_homography else 1.0
+        if threshold_scale != 1.0:
+            scale_thresholds(self.cfg, threshold_scale)
 
         self.detector = detector or Detector()
         self.tracker = tracker or Tracker(frame_rate=int(fps_hint))
@@ -66,6 +79,8 @@ class AccidentPipeline:
             meter_per_pixel=getattr(self.camera_cfg, "meter_per_pixel", 0.05),
         )
         self.verifier = Verifier(self.cfg)
+        self._collision_evidence = CollisionEvidence(
+            window_s=self.cfg.collision_collapse_window_s)
         self.fuser = IncidentFuser(
             window_s=self.cfg.fusion_window_s,
             radius_px=self.cfg.fusion_radius_px,
@@ -131,7 +146,8 @@ class AccidentPipeline:
         self.history.update(t, [(tid, bbox, cls) for tid, bbox, cls in tracks])
 
         raw_triggers = run_all_heuristics(self.history, t, self.cfg,
-                                           stop_zones=self.camera_cfg.stop_zones)
+                                           stop_zones=self.camera_cfg.stop_zones,
+                                           collision_evidence=self._collision_evidence)
         confirmed_events = self.fuser.process(
             t, self.verifier.process(t, raw_triggers))
 

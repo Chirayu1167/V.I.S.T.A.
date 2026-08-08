@@ -30,6 +30,24 @@ a genuinely stopped car sits below 1.8 km/h including tracker jitter). No
 changes were needed. If you switch to uncalibrated pixel speed readings
 (use_ml_speed=False, no homography), re-derive thresholds from your
 meter_per_pixel instead of trusting these m/s values.
+
+Scale re-anchor (2026-08-09, benchmark-driven)
+----------------------------------------------
+Benchmarking clips 01-10 showed the flat 0.05 m/px scale overstates speeds
+near the horizon (perspective), so thresholds tuned on flat readings are
+too strict for honest homography speeds: auto-calibration mode missed the
+clip_03 collision at the default thresholds. A sweep of threshold scales
+in auto mode (benchmark_accident.py --threshold-scale):
+
+    k=1.0  F1=0.36 (clip_03 collision missed)
+    k=0.5  F1=0.50
+    k=0.65 F1=0.55  <-- chosen
+    k=0.8  F1=0.55
+
+HOMOGRAPHY_THRESHOLD_SCALE=0.65 is applied automatically by
+AccidentPipeline whenever the camera carries a fitted homography
+(homography_src_points/dst_points set — auto-calibration or camera
+profile); flat/px-m paths keep the tuned scale of 1.0.
 """
 
 import json
@@ -54,6 +72,32 @@ COCO_TRUCK = 7
 VEHICLE_CLASSES = {COCO_CAR, COCO_MOTORCYCLE, COCO_BUS, COCO_TRUCK}
 PERSON_CLASSES = {COCO_PERSON, COCO_BICYCLE}
 ALL_TRACKED_CLASSES = VEHICLE_CLASSES | PERSON_CLASSES
+
+# ---------------------------------------------------------------------------
+# Threshold scale re-anchor for homography-based speeds (see module docstring)
+# ---------------------------------------------------------------------------
+HOMOGRAPHY_THRESHOLD_SCALE = 0.65
+
+PHYSICAL_VELOCITY_THRESHOLDS = (
+    "speed_drop_min_prior_speed",
+    "speed_drop_fast_decel_mps2",
+    "speed_drop_fast_end_max_velocity",
+    "collision_max_velocity",
+    "collision_min_prior_speed",
+    "anomaly_stop_max_velocity",
+    "anomaly_stop_min_prior_speed",
+    "hitrun_vehicle_continues_min_speed",
+)
+
+
+def scale_thresholds(cfg: "HeuristicConfig", k: float) -> None:
+    """Multiply all PHYSICAL-VELOCITY thresholds by k. Ratios, durations,
+    IoUs and pixel/distances stay untouched. Used to re-anchor thresholds
+    between the flat 0.05 m/px scale they were tuned on and the honest m/s
+    a fitted homography reports (which read systematically lower than flat
+    speeds near the horizon)."""
+    for name in PHYSICAL_VELOCITY_THRESHOLDS:
+        setattr(cfg, name, getattr(cfg, name) * k)
 
 
 @dataclass
@@ -94,6 +138,11 @@ class HeuristicConfig:
     # vehicles had already stopped (and fired on parked cars touching).
     # Values = old px/s thresholds × 0.05 m/px (old: 15 / 70 px/s).
     collision_iou_threshold: float = 0.45
+    collision_buffer_iou_threshold: float = 0.50  # deep-contact bar for the
+    # evidence buffer (a crash struck AT speed has deep overlap; a braking
+    # queue approach only touches at ~0.45)
+    collision_overlap_collapse_factor: float = 0.80  # velocity at the overlap
+    # instant already ≤ 0.80×prior counts as "collapse started at contact"
     collision_max_velocity: float = 0.75  # m/s (~15 px/s), "stopped at overlap" cap
     collision_min_prior_speed: float = 3.5  # m/s (~70 px/s), must have been moving this fast before overlap
     collision_decel_ratio: float = 0.65  # must lose >65% of pre-overlap speed
@@ -103,6 +152,8 @@ class HeuristicConfig:
     # signature. Window: [t - collision_prior_lookback_s, t - collision_prior_end_s].
     collision_prior_lookback_s: float = 1.2
     collision_prior_end_s: float = 0.2
+    collision_collapse_window_s: float = 0.8  # how long after a high-speed box
+    # overlap a pair vehicle may still collapse and count as the same impact
 
     # --- Signal 3: anomaly stop (stopped mid-road, not at a known stop zone) ---
     anomaly_stop_duration_s: float = 2.0

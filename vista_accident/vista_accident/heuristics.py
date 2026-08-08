@@ -11,7 +11,7 @@ Now supports ML-based speed estimation for real-world speeds (m/s, km/h).
 """
 
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from .config import HeuristicConfig, PERSON_CLASSES, VEHICLE_CLASSES
 from .track_history import TrackHistory
@@ -123,8 +123,61 @@ def _impacted(prior_v, now_v, cfg: HeuristicConfig) -> bool:
     return stopped or collapsed
 
 
-def check_collision(history: TrackHistory, t: float, cfg: HeuristicConfig) -> List[RawTrigger]:
+class CollisionEvidence:
+    """Causal memory for impact detection.
+
+    A real impact leaves TWO signatures that are usually NOT simultaneous:
+    (1) two moving vehicles overlap at high IoU for a frame or two, then
+    (2) one of them collapses to near-zero speed. Post-impact trajectories
+    can separate the boxes faster than the verifier window, so requiring
+    "overlap AND collapse in the SAME frame" (and for N consecutive frames)
+    misses real crashes (clip_07: overlap IoU 0.54 for ~1 frame while the
+    struck car still reads ~8 m/s, stops ~0.2s later).
+
+    This keeps the pre-impact (prior) speeds of recent high-speed overlaps;
+    if either vehicle's speed collapses within collision_collapse_window_s
+    of the overlap, the collision fires — same-frame (clip_03-style) or
+    shortly after (clip_07-style), and while the collapse persists the
+    verifier gets its consecutive frames.
+    """
+
+    def __init__(self, window_s: float = 0.8):
+        self.window_s = window_s
+        self._entries = {}  # sorted pair -> {"t":, "prior_a":, "prior_b":, "iou":, "cx":, "cy":}
+
+    @staticmethod
+    def _key(a: int, b: int):
+        return (a, b) if a < b else (b, a)
+
+    def remember(self, id_a: int, id_b: int, prior_a, prior_b, iou, cx, cy, t: float,
+                 now_a=None, now_b=None) -> None:
+        key = self._key(id_a, id_b)
+        entry = self._entries.get(key)
+        if entry is None:
+            entry = {"t": t, "prior_a": prior_a, "prior_b": prior_b,
+                     "iou": iou, "peak_iou": iou, "cx": cx, "cy": cy,
+                     "now_a": now_a, "now_b": now_b}
+            self._entries[key] = entry
+        else:
+            entry.update({"t": t, "iou": iou, "cx": cx, "cy": cy,
+                          "now_a": now_a, "now_b": now_b})
+            entry["peak_iou"] = max(entry["peak_iou"], iou)
+
+    def active_entries(self, t: float):
+        cutoff = t - self.window_s
+        stale = [k for k, e in self._entries.items() if e["t"] < cutoff]
+        for k in stale:
+            del self._entries[k]
+        return self._entries
+
+
+def check_collision(history: TrackHistory, t: float, cfg: HeuristicConfig,
+                    evidence: Optional[CollisionEvidence] = None) -> List[RawTrigger]:
+    """Impact detection. `evidence` carries recent high-speed overlaps across
+    frames (see CollisionEvidence) so the collapse can be confirmed shortly
+    after a brief overlap instead of needing both at the same instant."""
     triggers = []
+    evidence = evidence or CollisionEvidence(window_s=cfg.collision_collapse_window_s)
     vehicle_ids = history.active_ids(cls_filter=VEHICLE_CLASSES)
     for i in range(len(vehicle_ids)):
         for j in range(i + 1, len(vehicle_ids)):
@@ -142,26 +195,54 @@ def check_collision(history: TrackHistory, t: float, cfg: HeuristicConfig) -> Li
                 id_a, t - cfg.collision_prior_lookback_s, t - cfg.collision_prior_end_s)
             prior_b = history.velocity_between(
                 id_b, t - cfg.collision_prior_lookback_s, t - cfg.collision_prior_end_s)
-            now_a = history.instantaneous_velocity(id_a)
-            now_b = history.instantaneous_velocity(id_b)
-            if not (_impacted(prior_a, now_a, cfg) or _impacted(prior_b, now_b, cfg)):
-                continue
-            # Include ML speed details if available
-            ml_a = history.get_ml_speed(id_a)
-            ml_b = history.get_ml_speed(id_b)
-            meta = {"iou": iou, "v_a": now_a, "v_b": now_b,
-                    "prior_v_a": prior_a, "prior_v_b": prior_b,
-                    "cx": (pa.cx + pb.cx) / 2.0, "cy": (pa.cy + pb.cy) / 2.0}
-            if ml_a:
-                meta["ml_a_speed_mps"] = ml_a.speed_mps
-                meta["ml_a_speed_kmph"] = ml_a.speed_kmph
-            if ml_b:
-                meta["ml_b_speed_mps"] = ml_b.speed_mps
-                meta["ml_b_speed_kmph"] = ml_b.speed_kmph
-            triggers.append(RawTrigger(
-                kind="collision", track_ids=(id_a, id_b), t=t,
-                meta=meta,
-            ))
+            if (prior_a is None or prior_a < cfg.collision_min_prior_speed) and \
+               (prior_b is None or prior_b < cfg.collision_min_prior_speed):
+                continue  # neither was moving meaningfully — not an impact
+            evidence.remember(id_a, id_b, prior_a, prior_b, iou,
+                              (pa.cx + pb.cx) / 2.0, (pa.cy + pb.cy) / 2.0, t,
+                              now_a=history.instantaneous_velocity(id_a),
+                              now_b=history.instantaneous_velocity(id_b))
+
+    for (id_a, id_b), e in evidence.active_entries(t).items():
+        now_a = history.instantaneous_velocity(id_a)
+        now_b = history.instantaneous_velocity(id_b)
+        hit_a = _impacted(e["prior_a"], now_a, cfg)
+        hit_b = _impacted(e["prior_b"], now_b, cfg)
+        if not (hit_a or hit_b):
+            continue
+        # Discriminate a real impact from a queue-tail panic stop (clip_04 FP):
+        # either the velocity was ALREADY collapsing at the overlap instant
+        # (ratio ≤ collision_overlap_collapse_factor — crash physics started at
+        # contact, clip_07) or the contact itself was deep (peak IoU ≥ the
+        # buffer threshold — struck at speed, clip_03-style).
+        ratio_a = (e["now_a"] / e["prior_a"]) if (e["now_a"] is not None and e["prior_a"]) else None
+        ratio_b = (e["now_b"] / e["prior_b"]) if (e["now_b"] is not None and e["prior_b"]) else None
+        collapse_at_overlap = (
+            (hit_a and ratio_a is not None and ratio_a <= cfg.collision_overlap_collapse_factor)
+            or (hit_b and ratio_b is not None and ratio_b <= cfg.collision_overlap_collapse_factor))
+        deep_contact = e["peak_iou"] >= cfg.collision_buffer_iou_threshold
+        if not (collapse_at_overlap or deep_contact):
+            continue
+        # Include ML speed details if available
+        ml_a = history.get_ml_speed(id_a)
+        ml_b = history.get_ml_speed(id_b)
+        meta = {"iou": e["iou"], "v_a": now_a, "v_b": now_b,
+                "prior_v_a": e["prior_a"], "prior_v_b": e["prior_b"],
+                "cx": e["cx"], "cy": e["cy"]}
+        if collapse_at_overlap:
+            meta["collapse_at_overlap"] = True
+        if deep_contact:
+            meta["peak_iou"] = round(e["peak_iou"], 2)
+        if ml_a:
+            meta["ml_a_speed_mps"] = ml_a.speed_mps
+            meta["ml_a_speed_kmph"] = ml_a.speed_kmph
+        if ml_b:
+            meta["ml_b_speed_mps"] = ml_b.speed_mps
+            meta["ml_b_speed_kmph"] = ml_b.speed_kmph
+        triggers.append(RawTrigger(
+            kind="collision", track_ids=(id_a, id_b), t=t,
+            meta=meta,
+        ))
     return triggers
 
 
@@ -307,10 +388,11 @@ def _in_any_zone(point, zones) -> bool:
     return False
 
 
-def run_all_heuristics(history: TrackHistory, t: float, cfg: HeuristicConfig, stop_zones=None) -> List[RawTrigger]:
+def run_all_heuristics(history: TrackHistory, t: float, cfg: HeuristicConfig, stop_zones=None,
+                       collision_evidence: Optional[CollisionEvidence] = None) -> List[RawTrigger]:
     triggers = []
     triggers += check_speed_drop(history, t, cfg, stop_zones=stop_zones)
-    triggers += check_collision(history, t, cfg)
+    triggers += check_collision(history, t, cfg, evidence=collision_evidence)
     triggers += check_anomaly_stop(history, t, cfg, stop_zones=stop_zones)
     triggers += check_hit_and_run(history, t, cfg)
     return triggers
