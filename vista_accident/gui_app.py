@@ -56,11 +56,6 @@ from vista_accident.confirmation import SecondaryConfirmation
 from vista_accident.render import SEVERITY_COLORS, SEVERITY_RANK, SpeedEstimator, draw_overlay
 from vista_accident.tools.calibrate_camera import build_homography, render_birdseye_preview
 
-# Absolute base dir of THIS file (not cwd!): the GUI can be launched from
-# anywhere (shortcut, Explorer, terminal) — the alert log, clips, screenshots
-# and the control-room console must all anchor to the same place, otherwise
-# the console watches a different alerts.jsonl than the GUI writes and shows
-# nothing.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ALERTS_LOG = os.path.join(BASE_DIR, "alerts.jsonl")
 SCREENSHOT_DIR = os.path.join(BASE_DIR, "vista_screenshots")
@@ -72,23 +67,11 @@ ALERT_PANEL_WIDTH = 420
 BEFORE_OFFSET_S = 0.6   # how far back the "before" shot is grabbed from
 AFTER_DELAY_S = 0.8     # how long after the alert the "after" shot is grabbed
 
-# Incident grouping (DISPLAY-ONLY — never suppresses a dispatch, only merges
-# how the SAME crash is presented). Multiple heuristic kinds of one physical
-# crash arrive a few seconds apart at the same spot (collision ->
-# speed_drop). These are grouped into a single report card with ONE
-# clip + ONE screenshot set so one accident = one card. Groups are tight:
-# same spot within INCIDENT_MERGE_S and INCIDENT_MERGE_PX, or shared tracks.
+
 INCIDENT_MERGE_S = 6.0
 INCIDENT_MERGE_PX = 200.0
 
-# ---------------------------------------------------------------------------
-# VISUAL THEME (UI/presentation only — no functional code below this point
-# was changed to produce this theme).
-#
-# Palette matches the VISTA reference spec: light background, white cards,
-# dark-navy primary text, blue-gray secondary text, soft borders, generous
-# radii/padding and 40-48px control heights.
-# ---------------------------------------------------------------------------
+
 COLOR_BG = "#F5F7FA"
 COLOR_BG_RAISED = "#FFFFFF"
 COLOR_CARD = "#FFFFFF"
@@ -114,9 +97,7 @@ COLOR_PLACEHOLDER = COLOR_CARD_2
 RADIUS = 16
 RADIUS_SM = 10
 
-# Shared toolbar layout constants — one gap size used between every toolbar
-# section (Playback / Detection / Configuration / Calibrate) so the bar
-# reads as a single evenly-spaced system instead of ad hoc gaps per row.
+
 TOOLBAR_GAP = 24
 TOOLBAR_GAP_HALF = 12
 DIVIDER_LEN = 24
@@ -494,9 +475,7 @@ QDialog {{ background-color: {COLOR_BG}; }}
 """
 
 # Status-dot colors used by MainWindow._set_status (presentation-only helper).
-# Also drives the header "Status ● <state>" pill dot and the video-card
-# title dot — the ONLY places red is used for status is genuine "error"/
-# alert states, never for an idle/armed/neutral condition.
+
 STATUS_COLORS = {
     "idle": COLOR_TEXT_FAINT,   # gray  — waiting / stopped
     "busy": COLOR_AMBER,        # amber — analyzing / working
@@ -513,8 +492,7 @@ SEVERITY_ACCENTS = {
 }
 
 # Incident-count badge treatment (header of the Incident Report panel).
-# Kept as shared constants so the idle/reset state (_build_report_card,
-# start_analysis) and the active state (on_alert) never drift out of sync.
+
 BADGE_STYLE_IDLE = (
     f"background-color: {COLOR_CARD_2}; color: {COLOR_TEXT_DIM}; "
     f"border: 1px solid {COLOR_BORDER}; border-radius: 11px; "
@@ -597,13 +575,7 @@ def style_combo_popup(combo):
     popup.setAttribute(Qt.WA_TranslucentBackground, True)
     view.setAttribute(Qt.WA_TranslucentBackground, True)
     combo.setStyleSheet(combo.styleSheet())  # nudge Qt to reapply the QSS to the new popup window
-# ---------------------------------------------------------------------------
-# Vector icons — every icon in the app (upload, pause, stop, control room,
-# camera, bell, info, play) is drawn with QPainter primitives (lines, arcs,
-# paths) rather than emoji characters or raster images. This keeps the app
-# a single self-contained file with no icon assets to ship, while still
-# giving crisp, theme-colored, real vector iconography.
-# ---------------------------------------------------------------------------
+
 
 def render_icon_pixmap(draw_fn, size=20, color=COLOR_TEXT):
     """Render an icon draw function into a transparent QPixmap."""
@@ -952,10 +924,7 @@ class VideoWorker(QThread):
             if self.run_accident:
                 camera_cfg = self.camera_cfg or CameraConfig(
                     camera_id=self.camera_id, location_name=self.location)
-                # Manual px/m (the "Calibration" field) feeds the pixel-fallback
-                # scale: the overlay's SpeedEstimator consumes m/s from history,
-                # so the manual scale lands here as meter_per_pixel (ignored by
-                # the ML estimator when a homography/profile is present).
+                
                 if self.px_per_meter:
                     camera_cfg.meter_per_pixel = 1.0 / self.px_per_meter
                 pipeline = AccidentPipeline(
@@ -980,8 +949,7 @@ class VideoWorker(QThread):
                     clip_dir=self.clip_dir,
                 )
 
-            # Rolling buffer of raw (unannotated) frames, just deep enough to
-            # look back BEFORE_OFFSET_S for the "before" screenshot.
+           
             buf_len = max(2, int(fps * (BEFORE_OFFSET_S + 0.5)))
             raw_buffer = deque(maxlen=buf_len)
 
@@ -1593,13 +1561,10 @@ class MainWindow(QMainWindow):
 
         root.addWidget(body, 1)
 
-        # Initial idle status (presentation-only; same text as before, now
-        # routed through the status-dot helper).
+        
         self._set_status("Idle — Waiting for a video to analyze.", "idle")
 
-    # ------------------------------------------------------------
-    # Presentation-only UI builders
-    # ------------------------------------------------------------
+    
 
     def _build_header(self):
         header = QWidget()
@@ -1611,8 +1576,7 @@ class MainWindow(QMainWindow):
         h.setContentsMargins(32, 0, 32, 0)
         h.setSpacing(16)
 
-        # --- Brand cluster: "VISTA" + divider + "Accident Detection", all on
-        # one line, vertically centered in the bar. ---
+       
         brand_row = QHBoxLayout()
         brand_row.setSpacing(14)
         brand_row.setContentsMargins(0, 0, 0, 0)
@@ -1636,13 +1600,7 @@ class MainWindow(QMainWindow):
         h.addLayout(brand_row)
         h.addStretch(1)
 
-        # --- Right cluster: "Status  ● Idle" pill, then the primary Upload
-        # Video CTA. Uses the same header_status_label + _set_status()
-        # plumbing as before, so live status updates keep working unchanged.
-        # The pill is plain text+dot only — there is no separate empty
-        # "box" here to fill with red; red on this pill only ever appears
-        # via STATUS_COLORS["error"] when _set_status(..., "error") fires
-        # for a genuine error/alert condition. ---
+        
         self.header_status_label = QLabel()
         self.header_status_label.setTextFormat(Qt.RichText)
         h.addWidget(self.header_status_label)
@@ -1696,9 +1654,7 @@ class MainWindow(QMainWindow):
         row1.addWidget(make_divider(vertical=True, length=DIVIDER_LEN, thickness=1))
         row1.addSpacing(TOOLBAR_GAP_HALF)
 
-        # "Control room" is a secondary, polished, neutral-styled action —
-        # it opens a separate browser console, so it's visually distinct
-        # from the primary playback controls but still fully wired up.
+       
         self.control_room_btn = QPushButton("Control room")
         self.control_room_btn.setObjectName("neutralBtn")
         self.control_room_btn.setIcon(icon_from_draw(_draw_sliders, size=15, color=COLOR_SLATE))
@@ -1714,17 +1670,13 @@ class MainWindow(QMainWindow):
         row1.addWidget(make_divider(vertical=True, length=DIVIDER_LEN, thickness=1))
         row1.addSpacing(TOOLBAR_GAP_HALF)
 
-        # Push everything from here on (the DETECTION cluster) to the far
-        # right edge of the row.
+        
         row1.addStretch(1)
 
         row1.addLayout(self._group_header(_draw_shield, "DETECTION"))
         row1.addSpacing(TOOLBAR_GAP_HALF)
 
-        # Accident-detection is a plain checkbox, styled identically to the
-        # Violence-detection checkbox: brand blue when checked. Red is
-        # deliberately NOT used here — this is an armed/passive toggle, not
-        # an alert — so it no longer carries a red-accent objectName.
+        
         self.accident_check = QCheckBox("Accident detection")
         self.accident_check.setChecked(True)
         self.accident_check.setToolTip(
@@ -1747,10 +1699,7 @@ class MainWindow(QMainWindow):
 
         outer.addWidget(make_divider(vertical=False, length=10_000, thickness=1))
 
-        # --- Row 2: CONFIGURATION cluster, then Calibrate — one continuous
-        # run of fields at a consistent TOOLBAR_GAP, "Calibrate…" placed
-        # right after the Configuration cluster (no more oversized stretch
-        # gap pushing it off to the far edge). -----------------------------
+        
         row2 = QHBoxLayout()
         row2.setSpacing(8)
 
@@ -1797,10 +1746,7 @@ class MainWindow(QMainWindow):
         self._refresh_profile_combo()
         row2.addWidget(self.profile_combo)
 
-        # "Browse…" is kept alive (still fully wired to on_profile_browse)
-        # but hidden from the toolbar — the reference design drops it in
-        # favor of the Profile dropdown + "Calibrate…" flow. Set it visible
-        # again if you want the old control back.
+        
         self.profile_browse_btn = QPushButton("Browse…")
         self.profile_browse_btn.setObjectName("neutralBtn")
         self.profile_browse_btn.clicked.connect(self.on_profile_browse)
@@ -1825,10 +1771,7 @@ class MainWindow(QMainWindow):
         row2.addWidget(make_divider(vertical=True, length=DIVIDER_LEN, thickness=1))
         row2.addSpacing(TOOLBAR_GAP)
 
-        # "Calibrate…" is a normal secondary action now: same objectName
-        # (and therefore identical height/padding/radius/font-weight) as
-        # "Control room", and navy/slate text instead of red — red is no
-        # longer used for anything but genuine alert/error states.
+        
         self.calibrate_btn = QPushButton("Calibrate…")
         self.calibrate_btn.setObjectName("neutralBtn")
         self.calibrate_btn.setIcon(icon_from_draw(_draw_gear, size=14, color=COLOR_SLATE))
@@ -1917,9 +1860,7 @@ class MainWindow(QMainWindow):
         self._video_stack = stack
         self.video_display_wrap = display_wrap
 
-        # Empty-state copy/icon: crossed-out camera above "No video loaded" /
-        # "Upload a video to begin analysis", with a direct Upload action so
-        # the empty state isn't a dead end.
+        
         self.video_empty_widget = self._make_empty_state(
             _draw_camera_off, "No video loaded", "Upload a video to begin analysis",
             bg=None, icon_color=COLOR_SLATE, icon_size=56,
@@ -1937,12 +1878,7 @@ class MainWindow(QMainWindow):
         display_wrap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         v.addWidget(display_wrap, 1)
 
-        # Scrub row: flat play icon (no button chrome) + elapsed time +
-        # draggable-handle slider + total time + fullscreen, matching the
-        # reference's video-player control strip exactly.
-        # Playback control bar: play, elapsed time, scrub slider, total time,
-        # fullscreen — one QHBoxLayout, all children vertically centered on
-        # a shared centerline, with a fixed row height so nothing drifts.
+        
         scrub_row = QHBoxLayout()
         scrub_row.setSpacing(12)
         scrub_row.setContentsMargins(0, 0, 0, 0)
@@ -2092,9 +2028,7 @@ class MainWindow(QMainWindow):
         icon_label.setAlignment(Qt.AlignCenter)
         if bg:
             icon_label.setFixedSize(circle_size, circle_size)
-            # container_radius lets callers use a subtle rounded-square
-            # "chip" (e.g. radius 12) instead of a full circle — a lighter,
-            # more restrained treatment for compact empty states.
+            
             radius = container_radius if container_radius is not None else circle_size // 2
             border_css = f"border: 1px solid {container_border};" if container_border else "border: none;"
             icon_label.setStyleSheet(
@@ -2124,8 +2058,7 @@ class MainWindow(QMainWindow):
         subtitle.setWordWrap(True)
         v.addWidget(subtitle)
 
-        # Optional inline call-to-action (e.g. "Upload Video" from the video
-        # empty-state) so the empty state is actionable, not a dead end.
+        
         if action_text and action_slot:
             action_btn = QPushButton(action_text)
             action_btn.setObjectName("accentBtn")
@@ -2154,9 +2087,7 @@ class MainWindow(QMainWindow):
         )
 
         short = {"idle": "Idle", "busy": "Analyzing", "ok": "Done", "error": "Error"}.get(kind, "Idle")
-        # Status pill: small vertically-centered colored dot immediately
-        # before the state word (gray=idle, amber=busy, green=ok, red=error
-        # — i.e. red ONLY for a genuine error/alert state).
+        
         self.header_status_label.setText(
             f"<span style='color:{COLOR_TEXT_FAINT}; font-size:12.5px; font-weight:600;'>Status</span>"
             f"&nbsp;&nbsp;<span style='color:{dot}; font-size:13px; vertical-align:middle;'>&#9679;</span>"
@@ -2422,9 +2353,7 @@ class MainWindow(QMainWindow):
             self.progress_bar.setMaximum(1)
             self.progress_bar.setValue(0)
 
-        # Keep the scrub row's elapsed/total timestamps in sync using the
-        # worker's real source fps (falls back to 25.0 before the worker
-        # has opened the video).
+        
         fps = getattr(self.worker, "fps", 25.0) if self.worker else 25.0
         self.time_elapsed_label.setText(self._fmt_time(frame_idx / fps))
         if total_frames:
@@ -2462,9 +2391,7 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait()
-        # NOTE: the control-room console is deliberately left running — it's
-        # an independent display (big-screen demo), and the port-busy check
-        # in on_open_control_room prevents duplicate servers.
+        
         event.accept()
 
 
