@@ -26,6 +26,8 @@ Requires (in addition to requirements.txt): PyQt5
     pip install PyQt5
 """
 
+import copy
+import math
 import os
 import subprocess
 import sys
@@ -39,12 +41,12 @@ import numpy as np
 
 from PyQt5.QtCore import Qt, QThread, QUrl, pyqtSignal, QSize, QPointF, QRectF
 from PyQt5.QtGui import (
-    QImage, QPixmap, QFont, QDesktopServices, QColor, QPainter, QPainterPath,
+    QImage, QPixmap, QDesktopServices, QColor, QPainter, QPainterPath,
     QPen, QBrush, QIcon,
 )
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton, QVBoxLayout,
-    QHBoxLayout, QFileDialog, QScrollArea, QFrame, QProgressBar, QComboBox,
+    QHBoxLayout, QFileDialog, QScrollArea, QFrame, QComboBox,
     QCheckBox, QDoubleSpinBox, QSizePolicy, QDialog, QMessageBox, QGroupBox,
     QLineEdit, QSpinBox, QGraphicsDropShadowEffect, QStackedLayout, QSlider,
 )
@@ -53,7 +55,7 @@ from vista_accident import AccidentPipeline, CameraConfig, DispatchConfig, Heuri
 from vista_accident.camera_profile import find_profiles, load_profile, save_profile
 from vista_accident.detector import Detector
 from vista_accident.confirmation import SecondaryConfirmation
-from vista_accident.render import SEVERITY_COLORS, SEVERITY_RANK, SpeedEstimator, draw_overlay
+from vista_accident.render import SEVERITY_RANK, SpeedEstimator, draw_overlay
 from vista_accident.tools.calibrate_camera import build_homography, render_birdseye_preview
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -187,7 +189,7 @@ QPushButton#uploadBtn:disabled {{
 QPushButton#headerUploadBtn {{
     background-color: #E11D2A;
     border: 1px solid #E11D2A;
-    color: #E11D2A;          /* ← text is now red */
+    color: #FFFFFF;
     font-weight: 700;
     padding: 0px 26px;
     min-height: 44px;
@@ -685,8 +687,7 @@ def _draw_layers(p, size, color):
         path.lineTo(size * 0.5, dy * size + size * 0.14)
         path.lineTo(size * 0.14, dy * size)
         path.closeSubpath()
-        if dy == 0.30:
-            p.drawPath(path)
+        p.drawPath(path)
 
 
 def _draw_shield(p, size, color):
@@ -797,23 +798,6 @@ def _draw_fullscreen(p, size, color):
     p.drawLine(QPointF(size - m, size - m), QPointF(size - m, size - m - a))
 
 
-def _draw_bell(p, size, color):
-    pen = QPen(color, max(1.6, size * 0.05), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-    p.setPen(pen)
-    p.setBrush(Qt.NoBrush)
-    path = QPainterPath()
-    path.moveTo(size * 0.30, size * 0.64)
-    path.cubicTo(size * 0.30, size * 0.28, size * 0.70, size * 0.28, size * 0.70, size * 0.64)
-    path.lineTo(size * 0.80, size * 0.76)
-    path.lineTo(size * 0.20, size * 0.76)
-    path.closeSubpath()
-    p.drawPath(path)
-    p.drawArc(QRectF(size * 0.40, size * 0.74, size * 0.20, size * 0.16), 0, -180 * 16)
-    p.setBrush(QBrush(color))
-    p.setPen(Qt.NoPen)
-    p.drawEllipse(QPointF(size * 0.5, size * 0.18), size * 0.035, size * 0.035)
-
-
 def _draw_info(p, size, color):
     pen = QPen(color, max(1.4, size * 0.10), Qt.SolidLine, Qt.RoundCap)
     p.setPen(pen)
@@ -846,6 +830,7 @@ class VideoWorker(QThread):
 
     frame_ready = pyqtSignal(object)              # annotated BGR frame (np.ndarray)
     alert_ready = pyqtSignal(object, dict)        # AlertPayload, {"before":,"impact":,"after":}
+    alert_updated = pyqtSignal(str, dict)         # primary_alert_id, update_info dict
     shot_ready = pyqtSignal(str, str)             # alert_id, after-screenshot path
     clip_ready = pyqtSignal(str, str)             # alert_id, clip path (written a few frames after dispatch)
     progress = pyqtSignal(int, int)               # frame_idx, total_frames
@@ -872,6 +857,7 @@ class VideoWorker(QThread):
         self.fps = 25.0  # updated with the real source fps once run() opens the video
         self._stop = False
         self._pause = False
+        self._incidents = []
 
     def stop(self):
         self._stop = True
@@ -924,8 +910,9 @@ class VideoWorker(QThread):
             if self.run_accident:
                 camera_cfg = self.camera_cfg or CameraConfig(
                     camera_id=self.camera_id, location_name=self.location)
-                
+
                 if self.px_per_meter:
+                    camera_cfg = copy.copy(camera_cfg)
                     camera_cfg.meter_per_pixel = 1.0 / self.px_per_meter
                 pipeline = AccidentPipeline(
                     detector=Detector(device=self.device),
@@ -995,31 +982,88 @@ class VideoWorker(QThread):
                 for payload in result["alerts"]:
                     if not self._passes_filter(payload.severity):
                         continue
-                    inc = {
-                        "t": payload.timestamp,
-                        "cx": payload.meta.get("cx"),
-                        "cy": payload.meta.get("cy"),
-                        "tracks": set(payload.track_ids),
-                        "clip": [payload.alert_id],
-                    }
-                    self._incidents.append(inc)
-                    before_frame = self._lookup_before(raw_buffer, t - BEFORE_OFFSET_S)
-                    shots = {
-                        "before": self._save_shot(payload.alert_id, "before", before_frame)
-                        if before_frame is not None else None,
-                        "impact": self._save_shot(payload.alert_id, "impact", raw_copy),
-                        "after": None,
-                    }
-                    active_alerts.append({"payload": payload, "fired_t": t})
-                    pending_after.append({"due": t + AFTER_DELAY_S, "alert_id": payload.alert_id})
-                    self.alert_ready.emit(payload, shots)
+
+                    t_new = payload.timestamp
+                    cx_new = payload.meta.get("cx")
+                    cy_new = payload.meta.get("cy")
+                    tracks_new = set(payload.track_ids)
+
+                    # Look for an existing incident to merge with
+                    matched_inc = None
+                    for inc in reversed(self._incidents):
+                        dt = t_new - inc["t"]
+                        if dt < 0 or dt > INCIDENT_MERGE_S:
+                            continue
+
+                        has_track_overlap = bool(tracks_new & inc["tracks"])
+                        cx_inc = inc.get("cx")
+                        cy_inc = inc.get("cy")
+                        has_spatial = (cx_new is not None and cy_new is not None and cx_inc is not None and cy_inc is not None)
+
+                        if has_spatial:
+                            dist = math.hypot(cx_new - cx_inc, cy_new - cy_inc)
+                            if dist <= INCIDENT_MERGE_PX or has_track_overlap:
+                                matched_inc = inc
+                                break
+                        else:
+                            if has_track_overlap or cx_new is None or cx_inc is None:
+                                matched_inc = inc
+                                break
+
+                    if matched_inc is not None:
+                        # Fold into existing incident
+                        matched_inc["tracks"].update(payload.track_ids)
+                        matched_inc["clip"].append(payload.alert_id)
+                        if cx_new is not None and cy_new is not None:
+                            matched_inc["cx"] = cx_new
+                            matched_inc["cy"] = cy_new
+
+                        new_rank = SEVERITY_RANK.get(payload.severity, 0)
+                        old_rank = SEVERITY_RANK.get(matched_inc.get("severity", "low"), 0)
+                        if new_rank > old_rank:
+                            matched_inc["severity"] = payload.severity
+                            matched_inc["kind"] = payload.kind
+
+                        primary_id = matched_inc["clip"][0]
+                        active_alerts.append({"payload": payload, "fired_t": t})
+                        pending_after.append({"due": t + AFTER_DELAY_S, "alert_id": payload.alert_id, "primary_id": primary_id})
+
+                        self.alert_updated.emit(primary_id, {
+                            "payload": payload,
+                            "all_tracks": sorted(list(matched_inc["tracks"])),
+                            "severity": matched_inc.get("severity", payload.severity),
+                            "kind": matched_inc.get("kind", payload.kind),
+                        })
+                    else:
+                        inc = {
+                            "t": t_new,
+                            "cx": cx_new,
+                            "cy": cy_new,
+                            "tracks": set(payload.track_ids),
+                            "clip": [payload.alert_id],
+                            "severity": payload.severity,
+                            "kind": payload.kind,
+                        }
+                        self._incidents.append(inc)
+
+                        before_frame = self._lookup_before(raw_buffer, t - BEFORE_OFFSET_S)
+                        shots = {
+                            "before": self._save_shot(payload.alert_id, "before", before_frame)
+                            if before_frame is not None else None,
+                            "impact": self._save_shot(payload.alert_id, "impact", raw_copy),
+                            "after": None,
+                        }
+                        active_alerts.append({"payload": payload, "fired_t": t})
+                        pending_after.append({"due": t + AFTER_DELAY_S, "alert_id": payload.alert_id, "primary_id": payload.alert_id})
+                        self.alert_ready.emit(payload, shots)
 
                 if pending_after:
                     still_pending = []
                     for p in pending_after:
                         if t >= p["due"]:
                             after_path = self._save_shot(p["alert_id"], "after", raw_copy)
-                            self.shot_ready.emit(p["alert_id"], after_path)
+                            target_id = p.get("primary_id", p["alert_id"])
+                            self.shot_ready.emit(target_id, after_path)
                         else:
                             still_pending.append(p)
                     pending_after = still_pending
@@ -1154,23 +1198,23 @@ class AlertCard(QFrame):
         outer.setSpacing(8)
 
         title_row = QHBoxLayout()
-        kind = QLabel(payload.kind.replace('_', ' ').title())
-        kind.setStyleSheet(f"color: {COLOR_TEXT}; font-weight: 700; font-size: 13px; border: none; background: transparent;")
-        title_row.addWidget(kind)
+        self.kind_label = QLabel(payload.kind.replace('_', ' ').title())
+        self.kind_label.setStyleSheet(f"color: {COLOR_TEXT}; font-weight: 700; font-size: 13px; border: none; background: transparent;")
+        title_row.addWidget(self.kind_label)
         title_row.addStretch(1)
-        sev = QLabel(payload.severity.upper())
-        sev.setStyleSheet(f"color: {accent}; font-weight: 700; font-size: 11.5px; letter-spacing: 0.3px; border: none; background: transparent;")
-        title_row.addWidget(sev)
+        self.sev_label = QLabel(payload.severity.upper())
+        self.sev_label.setStyleSheet(f"color: {accent}; font-weight: 700; font-size: 11.5px; letter-spacing: 0.3px; border: none; background: transparent;")
+        title_row.addWidget(self.sev_label)
         outer.addLayout(title_row)
 
         ts = datetime.now().strftime("%H:%M:%S")
-        subtitle = QLabel(
+        self.subtitle_label = QLabel(
             f"t={payload.timestamp:.1f}s  ·  tracks {payload.track_ids}  ·  {ts}  ·  "
             f"→ {', '.join(c.replace('_', ' ') for c in payload.channels)}"
         )
-        subtitle.setStyleSheet(f"color: {COLOR_TEXT_FAINT}; font-size: 11px; border: none; background: transparent;")
-        subtitle.setWordWrap(True)
-        outer.addWidget(subtitle)
+        self.subtitle_label.setStyleSheet(f"color: {COLOR_TEXT_FAINT}; font-size: 11px; border: none; background: transparent;")
+        self.subtitle_label.setWordWrap(True)
+        outer.addWidget(self.subtitle_label)
 
         strip = QHBoxLayout()
         strip.setSpacing(8)
@@ -1211,6 +1255,30 @@ class AlertCard(QFrame):
         ok = bool(path and os.path.exists(path))
         self.clip_btn.setEnabled(ok)
         self.clip_btn.setText("Play clip" if ok else "Clip not found")
+
+    def update_incident(self, update_info):
+        payload = update_info["payload"]
+        all_tracks = update_info.get("all_tracks", payload.track_ids)
+        severity = update_info.get("severity", payload.severity)
+        kind = update_info.get("kind", payload.kind)
+        accent = SEVERITY_ACCENTS.get(severity, COLOR_SLATE)
+
+        self.kind_label.setText(kind.replace('_', ' ').title())
+        self.sev_label.setText(severity.upper())
+        self.sev_label.setStyleSheet(
+            f"color: {accent}; font-weight: 700; font-size: 11.5px; "
+            f"letter-spacing: 0.3px; border: none; background: transparent;"
+        )
+        self.setStyleSheet(
+            f"AlertCard {{ background-color: {COLOR_CARD_2}; "
+            f"border: 1px solid {COLOR_BORDER_SOFT}; border-left: 3px solid {accent}; "
+            f"border-radius: {RADIUS_SM}px; }}"
+        )
+        ts = datetime.now().strftime("%H:%M:%S")
+        channels_str = ", ".join(c.replace('_', ' ') for c in payload.channels)
+        self.subtitle_label.setText(
+            f"t={payload.timestamp:.1f}s  ·  tracks {all_tracks}  ·  {ts}  ·  → {channels_str}"
+        )
 
     def _play_clip(self):
         cpath = getattr(self, "_clip_path", None)
@@ -1462,7 +1530,7 @@ class CalibrationDialog(QDialog):
             homography_dst_points=[[p["wx"], p["wy"]] for p in self._points],
         )
         if self.mpp_spin.value() > 0:
-            cfg.meter_per_pixel = self.mpp_spin.value()
+            cfg.meter_per_pixel = 1.0 / self.mpp_spin.value()
         note = self.note_edit.text().strip()
         save_profile(path, cfg, calibration_note=note)
         self.profile_saved.emit(path)
@@ -1724,7 +1792,8 @@ class MainWindow(QMainWindow):
         row2.addWidget(self._toolbar_label("Device"))
         self.device_combo = QComboBox()
         self.device_combo.setObjectName("toolbarField")
-        self.device_combo.addItems(["cpu", "cuda"])
+        default_devices = ["cuda", "cpu"] if torch.cuda.is_available() else ["cpu", "cuda"]
+        self.device_combo.addItems(default_devices)
         self.device_combo.setMinimumWidth(150)
         self.device_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         style_combo_popup(self.device_combo)
@@ -1744,13 +1813,13 @@ class MainWindow(QMainWindow):
         self.profile_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         style_combo_popup(self.profile_combo)
         self._refresh_profile_combo()
+        self.profile_combo.currentIndexChanged.connect(self.on_profile_selected)
         row2.addWidget(self.profile_combo)
 
-        
         self.profile_browse_btn = QPushButton("Browse…")
         self.profile_browse_btn.setObjectName("neutralBtn")
         self.profile_browse_btn.clicked.connect(self.on_profile_browse)
-        self.profile_browse_btn.setVisible(False)
+        row2.addWidget(self.profile_browse_btn)
 
         row2.addSpacing(TOOLBAR_GAP)
         row2.addWidget(self._toolbar_label("Calibration"))
@@ -2126,18 +2195,6 @@ class MainWindow(QMainWindow):
             f"color: {label_color}; font-size: 12.5px; font-weight: 600; border: none; background: transparent;"
         )
 
-    def _center_on_screen(self):
-        """Center the window on the primary screen's available (non-taskbar)
-        area. Called right after resize() so width/height are already set;
-        without this the window manager places the top-level widget at an
-        arbitrary offset (observed floating toward the right edge)."""
-        screen = QApplication.primaryScreen()
-        if screen is None:
-            return
-        available = screen.availableGeometry()
-        x = available.x() + (available.width() - self.width()) // 2
-        y = available.y() + (available.height() - self.height()) // 2
-        self.move(max(available.x(), x), max(available.y(), y))
 
     # ------------------------------------------------------------
     def on_upload(self):
@@ -2159,6 +2216,15 @@ class MainWindow(QMainWindow):
         idx = self.profile_combo.findText(current)
         self.profile_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.profile_combo.blockSignals(False)
+
+    def on_profile_selected(self, index):
+        path = self.profile_combo.itemData(index)
+        if path:
+            if path != self.camera_profile_path:
+                self._use_profile(path)
+        else:
+            self.camera_cfg = None
+            self.camera_profile_path = None
 
     def on_profile_browse(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -2229,6 +2295,7 @@ class MainWindow(QMainWindow):
         )
         self.worker.frame_ready.connect(self.on_frame)
         self.worker.alert_ready.connect(self.on_alert)
+        self.worker.alert_updated.connect(self.on_alert_updated)
         self.worker.shot_ready.connect(self.on_shot_ready)
         self.worker.clip_ready.connect(self.on_clip_ready)
         self.worker.progress.connect(self.on_progress)
@@ -2294,6 +2361,7 @@ class MainWindow(QMainWindow):
     def on_stop(self):
         if self.worker:
             self.worker.stop()
+            self.worker.wait()
         self.pause_btn.setEnabled(False)
         self.pause_btn.setText("Pause")
         self.pause_btn.setIcon(icon_from_draw(_draw_pause, size=15, color=COLOR_ACCENT))
@@ -2335,6 +2403,11 @@ class MainWindow(QMainWindow):
         self.alert_badge.setText(str(self.alert_count))
         self.alert_badge.setStyleSheet(BADGE_STYLE_ACTIVE)
 
+    def on_alert_updated(self, primary_id, update_info):
+        card = self.alert_cards.get(primary_id)
+        if card:
+            card.update_incident(update_info)
+
     def on_shot_ready(self, alert_id, after_path):
         card = self.alert_cards.get(alert_id)
         if card:
@@ -2366,10 +2439,12 @@ class MainWindow(QMainWindow):
 
     def on_finished(self, summary):
         clips = summary.get("clips_saved", 0)
+        violence = summary.get("violence", 0)
+        violence_note = f", {violence} violence alert(s)" if violence else ""
         self._set_status(
             f"Done — {summary['frames']} frames processed, "
-            f"{summary['confirmed']} confirmed, {summary['dispatched']} dispatched, "
-            f"{clips} clip(s) saved to {CLIP_DIR}.",
+            f"{summary['confirmed']} confirmed, {summary['dispatched']} dispatched"
+            f"{violence_note}, {clips} clip(s) saved to {CLIP_DIR}.",
             "ok",
         )
         self.pause_btn.setEnabled(False)
