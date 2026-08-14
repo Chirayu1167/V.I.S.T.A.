@@ -627,6 +627,11 @@ class Handler(BaseHTTPRequestHandler):
                     start = int(s)
                 if e:
                     end = min(int(e), size - 1)
+            # Clamp to the file's real bounds so a malformed/out-of-range
+            # range (e.g. "bytes=5000-" on a small file) can never produce
+            # a negative Content-Length or a 206 with no body.
+            start = max(0, min(start, size - 1))
+            end = max(start, min(end, size - 1))
             self.send_response(206)
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         else:

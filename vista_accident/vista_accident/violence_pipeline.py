@@ -187,6 +187,7 @@ class ViolencePipeline:
         self._clip_buffer.append((t, frame.copy()))
 
         alerts = []
+        confirmed_events = []
         if self.frame_count % self.cfg.pose_cadence_frames == 0:
             persons = persons if persons is not None else self.detector.detect(frame)
             tracked = self.tracker.update([(b, c, 0) for (b, c, _) in persons])
@@ -214,7 +215,7 @@ class ViolencePipeline:
         saved_clips = self._process_pending_clips(t)
         return {
             "tracks": [(tid, bbox, 0) for (tid, bbox, _) in self.latest_persons],
-            "confirmed_events": [],  # filled only on cadence frames; keep key for callers
+            "confirmed_events": confirmed_events,
             "alerts": alerts,
             "clips_saved": saved_clips,
             "persons": self.latest_persons,
@@ -235,8 +236,12 @@ class ViolencePipeline:
         severity = self.severity.assess(event, None)
         clip_path = None
         if self.clip_dir:
+            # "viol-" prefix: the accident branch writes the SAME filename
+            # pattern for its own alerts (same camera_id, same second, same
+            # frame_count when both run in lockstep) — without a branch tag
+            # one alert's clip would silently overwrite the other's.
             clip_path = os.path.join(self.clip_dir,
-                                     f"pending-{self.camera_cfg.camera_id}-{int(event.t)}-{self.frame_count}.mp4")
+                                     f"pending-viol-{self.camera_cfg.camera_id}-{int(event.t)}-{self.frame_count}.mp4")
         payload = self.dispatcher.build_and_dispatch(
             event, {"ran": False, "confidence": None}, clip_path, severity=severity)
         self.confirmed_log.append((event, {}, "dispatched"))

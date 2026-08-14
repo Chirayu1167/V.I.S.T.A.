@@ -95,9 +95,20 @@ def scale_thresholds(cfg: "HeuristicConfig", k: float) -> None:
     IoUs and pixel/distances stay untouched. Used to re-anchor thresholds
     between the flat 0.05 m/px scale they were tuned on and the honest m/s
     a fitted homography reports (which read systematically lower than flat
-    speeds near the horizon)."""
+    speeds near the horizon).
+
+    Idempotent: the applied factor is remembered on the config, so calling
+    this again (e.g. a second AccidentPipeline constructed over the same
+    shared HeuristicConfig) re-anchors from the previously-applied factor
+    instead of compounding it (0.65 x 0.65 = 0.42 silently loosened every
+    velocity threshold)."""
+    prev = getattr(cfg, "_threshold_scale_applied", 1.0)
+    if k == prev:
+        return
+    factor = k / prev
     for name in PHYSICAL_VELOCITY_THRESHOLDS:
-        setattr(cfg, name, getattr(cfg, name) * k)
+        setattr(cfg, name, getattr(cfg, name) * factor)
+    cfg._threshold_scale_applied = k
 
 
 @dataclass

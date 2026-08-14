@@ -220,7 +220,11 @@ class AccidentPipeline:
             # Reserve the path now (dispatch isn't delayed for it); the
             # actual file is written a few frames later once the buffer
             # has enough post-impact frames — see _process_pending_clips.
-            clip_path = os.path.join(self.clip_dir, f"pending-{self.camera_cfg.camera_id}-{int(event.t)}-{self.frame_count}.mp4")
+            # "acc-" prefix: the violence branch writes the SAME filename
+            # pattern for its own alerts (same camera_id, same second, same
+            # frame_count when both run in lockstep) — without a branch tag
+            # one alert's clip would silently overwrite the other's.
+            clip_path = os.path.join(self.clip_dir, f"pending-acc-{self.camera_cfg.camera_id}-{int(event.t)}-{self.frame_count}.mp4")
 
         payload = self.dispatcher.build_and_dispatch(event, secondary_result, clip_path, severity=severity)
         self.confirmed_log.append((event, secondary_result, "dispatched"))

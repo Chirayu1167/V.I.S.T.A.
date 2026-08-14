@@ -192,5 +192,7 @@ def clear_incidents(conn) -> int:
 
 
 def new_incident_id(conn) -> str:
-    n = conn.execute("SELECT COUNT(*) AS n FROM incidents").fetchone()["n"]
-    return f"INC-{int(time.time())}-{n + 1}"
+    # Random suffix (not a count) so concurrent POSTs under the
+    # ThreadingHTTPServer can never collide on the PRIMARY KEY.
+    import uuid
+    return f"INC-{int(time.time())}-{uuid.uuid4().hex[:6]}"

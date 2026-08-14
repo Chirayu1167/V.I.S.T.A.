@@ -867,7 +867,11 @@ class VideoWorker(QThread):
         return self._pause
 
     def _passes_filter(self, severity):
-        return SEVERITY_RANK.get(severity, 0) >= SEVERITY_RANK.get(self.min_severity, 0)
+        # During a multi-alert burst the dispatcher suffixes severity with
+        # " (bundled)" — strip it so bundled alerts aren't ranked as unknown
+        # (rank 0) and dropped from the report panel on higher min-severities.
+        base = (severity or "").split(" (", 1)[0]
+        return SEVERITY_RANK.get(base, 0) >= SEVERITY_RANK.get(self.min_severity, 0)
 
     def _save_shot(self, alert_id, phase, frame):
         os.makedirs(SCREENSHOT_DIR, exist_ok=True)

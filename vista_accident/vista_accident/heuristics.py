@@ -51,7 +51,9 @@ def check_speed_drop(history: TrackHistory, t: float, cfg: HeuristicConfig,
         if prior_v < cfg.speed_drop_min_prior_speed:
             continue  # was already slow/stationary — not a meaningful "drop"
         p = history.latest(tid)
-        if p and _in_any_zone((p.cx, p.cy), stop_zones):
+        if p is None:
+            continue  # active_ids() guarantees this today, but never trust it
+        if _in_any_zone((p.cx, p.cy), stop_zones):
             continue  # legitimate braking at an intersection/bus stop — suppress
         drop_ratio = (prior_v - now_v) / prior_v
         fired = drop_ratio > cfg.speed_drop_ratio
@@ -314,7 +316,9 @@ def check_anomaly_stop(history: TrackHistory, t: float, cfg: HeuristicConfig, st
         if prior_v is None or prior_v < cfg.anomaly_stop_min_prior_speed:
             continue
         p = history.latest(tid)
-        if p and _in_any_zone((p.cx, p.cy), stop_zones):
+        if p is None:
+            continue  # active_ids() guarantees this today, but never trust it
+        if _in_any_zone((p.cx, p.cy), stop_zones):
             continue  # legitimate stop (intersection/bus stop) — suppress
         ml_speed = history.get_ml_speed(tid)
         meta = {"duration": duration, "prior_v": prior_v, "cx": p.cx, "cy": p.cy}
